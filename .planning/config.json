@@ -1,0 +1,15 @@
+{
+  "tech_stack": [
+    "Next.js",
+    "TailwindCSS",
+    "TensorFlow.js",
+    "MediaPipe",
+    "Prisma",
+    "Supabase/Firebase (TBD)"
+  ],
+  "preferences": {
+    "language": "ko",
+    "design_system": "modern",
+    "pwa": true
+  }
+}

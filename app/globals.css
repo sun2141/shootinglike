@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --color-neon-green: #39FF14;
+  --color-neon-blue: #04d9ff;
+  --color-neon-pink: #ff00ff;
+  --color-dark-bg: #0a0a0a;
+  --color-dark-card: #141414;
+  --color-dark-border: #262626;
+  
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+@layer base {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ffffff;
+    --primary: #39FF14;
+    --card: #141414;
+    --card-foreground: #ffffff;
+    --border: #262626;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-[var(--border)];
+  }
+  body {
+    @apply bg-[var(--background)] text-[var(--foreground)] font-sans antialiased;
+    background-image: 
+      radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+      radial-gradient(at 50% 0%, hsla(225,39%,30%,0.1) 0, transparent 50%), 
+      radial-gradient(at 100% 0%, hsla(339,49%,30%,0.1) 0, transparent 50%);
+    min-height: 100vh;
+  }
+}
+
+@layer utilities {
+  .text-neon {
+    text-shadow: 0 0 10px rgba(57, 255, 20, 0.5), 0 0 20px rgba(57, 255, 20, 0.3);
+  }
+  
+  .border-neon {
+    box-shadow: 0 0 10px rgba(57, 255, 20, 0.2);
+    border-color: rgba(57, 255, 20, 0.5);
+  }
+  
+  .glass-card {
+    @apply bg-black/40 backdrop-blur-md border border-white/10 rounded-2xl;
+  }
+}
