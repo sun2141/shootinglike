@@ -1,12 +1,17 @@
 import Link from "next/link";
 import { ArrowLeft, Trophy } from "lucide-react";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 // Server component
 export const dynamic = 'force-dynamic';
 
+type LeaderboardAnalysis = Prisma.AnalysisGetPayload<{
+  include: { user: true };
+}>;
+
 export default async function LeaderboardPage() {
-  let analyses: any[] = [];
+  let analyses: LeaderboardAnalysis[] = [];
   try {
     analyses = await prisma.analysis.findMany({
       take: 20,

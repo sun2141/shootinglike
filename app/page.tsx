@@ -46,30 +46,30 @@ export default function Home() {
           </Link>
         </div>
 
-        {/* Features Grid */}
+        {/* Guide Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full mt-16 pt-16 border-t border-white/10">
           <div className="glass-card p-6 flex flex-col items-center text-center space-y-4">
             <div className="w-12 h-12 rounded-full bg-[var(--color-neon-green)]/10 flex items-center justify-center text-[var(--color-neon-green)] mb-2">
-              <Zap size={24} />
+              <Target size={24} />
             </div>
-            <h3 className="text-xl font-bold">Speed Est.</h3>
-            <p className="text-gray-400 text-sm">Calculate initial ball speed based on your physical scale.</p>
+            <h3 className="text-xl font-bold">전신과 공이 보이게</h3>
+            <p className="text-gray-400 text-sm">촬영 각도는 측면 또는 후방 대각선을 권장합니다.</p>
           </div>
           
           <div className="glass-card p-6 flex flex-col items-center text-center space-y-4">
             <div className="w-12 h-12 rounded-full bg-[var(--color-neon-blue)]/10 flex items-center justify-center text-[var(--color-neon-blue)] mb-2">
               <Activity size={24} />
             </div>
-            <h3 className="text-xl font-bold">Form Check</h3>
-            <p className="text-gray-400 text-sm">AI posture analysis to correct your plant foot and follow-through.</p>
+            <h3 className="text-xl font-bold">5~10초 길이</h3>
+            <p className="text-gray-400 text-sm">임팩트 1초 전부터 공이 날아가는 모습까지 짧게 찍어주세요.</p>
           </div>
 
           <div className="glass-card p-6 flex flex-col items-center text-center space-y-4">
             <div className="w-12 h-12 rounded-full bg-white/10 flex items-center justify-center text-white mb-2">
-              <Target size={24} />
+              <Zap size={24} />
             </div>
-            <h3 className="text-xl font-bold">Compete</h3>
-            <p className="text-gray-400 text-sm">Rank up on the global leaderboard with your best strikes.</p>
+            <h3 className="text-xl font-bold">60fps 이상 권장</h3>
+            <p className="text-gray-400 text-sm">카메라 설정에서 60fps 이상으로 설정하면 정확도가 크게 상승합니다.</p>
           </div>
         </div>
       </main>
