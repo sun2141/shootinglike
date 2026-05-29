@@ -6,8 +6,8 @@ const DEFAULT_HEIGHT_M = 1.75;
 export function estimateSpeedKmh(
   nose: Point,
   ankle: Point,
-  impactFootStart: Point,
-  impactFootEnd: Point,
+  ballStart: Point,
+  ballEnd: Point,
   framesElapsed: number,
   fps: number = 30 
 ): number {
@@ -18,7 +18,7 @@ export function estimateSpeedKmh(
   const pixelsPerMeter = bodyPixels / DEFAULT_HEIGHT_M;
   
   // 2. Calculate ball/foot travel distance in pixels
-  const travelPixels = calculateDistance(impactFootStart, impactFootEnd);
+  const travelPixels = calculateDistance(ballStart, ballEnd);
   
   // 3. Convert to meters
   const travelMeters = travelPixels / pixelsPerMeter;

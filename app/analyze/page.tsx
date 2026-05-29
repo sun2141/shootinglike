@@ -21,114 +21,187 @@ interface AnalysisResult {
 
 export default function AnalyzePage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [isModelLoading, setIsModelLoading] = useState(true);
+  const [isPoseLoading, setIsPoseLoading] = useState(true);
+  const [isBallLoading, setIsBallLoading] = useState(true);
+  const isModelLoading = isPoseLoading || isBallLoading;
+  
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [impactDetected, setImpactDetected] = useState(false);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const workerRef = useRef<Worker | null>(null);
+  const poseWorkerRef = useRef<Worker | null>(null);
+  const ballWorkerRef = useRef<Worker | null>(null);
   const shareCardRef = useRef<HTMLDivElement>(null);
   const [isSharing, setIsSharing] = useState(false);
+  const [optIn, setOptIn] = useState(false);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
   
-  // Heuristic tracking state
+  // Tracking state
   const prevFootPosRef = useRef<{ x: number, y: number } | null>(null);
-  const isProcessingFrameRef = useRef(false);
+  const prevBallPosRef = useRef<{ x: number, y: number } | null>(null);
+  
+  const isPoseProcessingRef = useRef(false);
+  const isBallProcessingRef = useRef(false);
   
   // Analysis variables
   const frameCounterRef = useRef<number>(0);
   const impactFrameIndexRef = useRef<number>(-1);
   const startFootPosRef = useRef<{x: number, y: number} | null>(null);
-  const endFootPosRef = useRef<{x: number, y: number} | null>(null);
   const nosePosRef = useRef<{x: number, y: number} | null>(null);
   const anklePosRef = useRef<{x: number, y: number} | null>(null);
   const formResultRef = useRef<FormResult | null>(null);
 
-  useEffect(() => {
-    workerRef.current = new Worker(new URL('../../lib/workers/pose.worker.ts', import.meta.url));
-    
-    workerRef.current.onmessage = (e) => {
-      const { type, landmarks } = e.data;
-      
-      if (type === "INIT_SUCCESS") {
-        setIsModelLoading(false);
-      } else if (type === "INIT_ERROR") {
-        console.error("Worker init error", e.data.error);
-        setIsModelLoading(false);
-      } else if (type === "DETECT_RESULT") {
-        const canvas = canvasRef.current;
-        const ctx = canvas?.getContext("2d");
-        const video = videoRef.current;
-        if (!ctx || !canvas || !video) {
-          isProcessingFrameRef.current = false;
-          return;
-        }
+  // Ball variables
+  const ballStartPosRef = useRef<{x: number, y: number} | null>(null);
+  const ballEndPosRef = useRef<{x: number, y: number} | null>(null);
+  const ballTrajectoryRef = useRef<{x: number, y: number}[]>([]);
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        frameCounterRef.current += 1;
+  useEffect(() => {
+    poseWorkerRef.current = new Worker(new URL('../../lib/workers/pose.worker.ts', import.meta.url));
+    ballWorkerRef.current = new Worker(new URL('../../lib/workers/ball.worker.ts', import.meta.url));
+    
+    poseWorkerRef.current.onmessage = (e) => {
+      const { type, landmarks } = e.data;
+      if (type === "INIT_SUCCESS") {
+        setIsPoseLoading(false);
+      } else if (type === "INIT_ERROR") {
+        console.error("Pose Worker init error", e.data.error);
+        setIsPoseLoading(false);
+      } else if (type === "DETECT_RESULT") {
+        processPoseResult(landmarks);
+        isPoseProcessingRef.current = false;
+      }
+    };
+
+    ballWorkerRef.current.onmessage = (e) => {
+      const { type, balls } = e.data;
+      if (type === "INIT_SUCCESS") {
+        setIsBallLoading(false);
+      } else if (type === "INIT_ERROR") {
+        console.error("Ball Worker init error", e.data.error);
+        setIsBallLoading(false);
+      } else if (type === "DETECT_RESULT") {
+        processBallResult(balls);
+        isBallProcessingRef.current = false;
+      }
+    };
+
+    poseWorkerRef.current.postMessage({ type: "INIT" });
+    ballWorkerRef.current.postMessage({ type: "INIT" });
+    
+    return () => {
+      poseWorkerRef.current?.terminate();
+      ballWorkerRef.current?.terminate();
+    };
+  }, []);
+
+  const processPoseResult = (landmarks: any[]) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!ctx || !canvas || !landmarks || landmarks.length === 0) return;
+
+    for (const landmark of landmarks) {
+      drawLandmarks(ctx, landmark);
+      drawConnectors(ctx, landmark, PoseLandmarker.POSE_CONNECTIONS, { color: "rgba(0, 255, 0, 0.7)", lineWidth: 3 });
+      
+      const rightFoot = landmark[32]; 
+      
+      if (rightFoot && rightFoot.visibility && rightFoot.visibility > 0.5) {
+        const currentX = rightFoot.x * canvas.width;
+        const currentY = rightFoot.y * canvas.height;
         
-        if (landmarks && landmarks.length > 0) {
-          for (const landmark of landmarks) {
-            drawLandmarks(ctx, landmark);
-            drawConnectors(ctx, landmark, PoseLandmarker.POSE_CONNECTIONS, { color: "rgba(0, 255, 0, 0.7)", lineWidth: 3 });
+        if (prevFootPosRef.current) {
+          const dx = currentX - prevFootPosRef.current.x;
+          const dy = currentY - prevFootPosRef.current.y;
+          const velocity = Math.sqrt(dx * dx + dy * dy);
+          
+          // Heuristic: fast foot movement and impact not detected yet
+          if (velocity > 30 && impactFrameIndexRef.current === -1) {
+            startFootPosRef.current = { x: currentX, y: currentY };
+            if (landmark[0]) nosePosRef.current = { x: landmark[0].x * canvas.width, y: landmark[0].y * canvas.height };
+            if (landmark[27]) anklePosRef.current = { x: landmark[27].x * canvas.width, y: landmark[27].y * canvas.height };
             
-            // Right Foot Index
-            const rightFoot = landmark[32]; 
-            
-            if (rightFoot && rightFoot.visibility && rightFoot.visibility > 0.5) {
-              const currentX = rightFoot.x * canvas.width;
-              const currentY = rightFoot.y * canvas.height;
-              
-              if (prevFootPosRef.current) {
-                const dx = currentX - prevFootPosRef.current.x;
-                const dy = currentY - prevFootPosRef.current.y;
-                const velocity = Math.sqrt(dx * dx + dy * dy);
-                
-                // Impact detection
-                if (velocity > 30 && impactFrameIndexRef.current === -1) {
-                  setImpactDetected(true);
-                  impactFrameIndexRef.current = frameCounterRef.current;
-                  startFootPosRef.current = { x: currentX, y: currentY };
-                  
-                  if (landmark[0]) nosePosRef.current = { x: landmark[0].x * canvas.width, y: landmark[0].y * canvas.height };
-                  if (landmark[27]) anklePosRef.current = { x: landmark[27].x * canvas.width, y: landmark[27].y * canvas.height }; // Left Ankle
-                  
-                  // Calculate Form Score at Impact
-                  if (landmark[23] && landmark[25] && landmark[27] && landmark[11]) {
-                    const plantHip = { x: landmark[23].x * canvas.width, y: landmark[23].y * canvas.height }; 
-                    const plantKnee = { x: landmark[25].x * canvas.width, y: landmark[25].y * canvas.height }; 
-                    const plantAnkle = { x: landmark[27].x * canvas.width, y: landmark[27].y * canvas.height }; 
-                    const leftShoulder = { x: landmark[11].x * canvas.width, y: landmark[11].y * canvas.height }; 
-                    
-                    formResultRef.current = calculateFormScore(plantHip, plantKnee, plantAnkle, leftShoulder);
-                  }
-                }
-              }
-              
-              // Track post-impact foot trajectory for 5 frames to estimate speed
-              if (impactFrameIndexRef.current !== -1 && frameCounterRef.current <= impactFrameIndexRef.current + 5) {
-                endFootPosRef.current = { x: currentX, y: currentY };
-              }
-              
-              prevFootPosRef.current = { x: currentX, y: currentY };
+            if (landmark[23] && landmark[25] && landmark[27] && landmark[11]) {
+              const plantHip = { x: landmark[23].x * canvas.width, y: landmark[23].y * canvas.height }; 
+              const plantKnee = { x: landmark[25].x * canvas.width, y: landmark[25].y * canvas.height }; 
+              const plantAnkle = { x: landmark[27].x * canvas.width, y: landmark[27].y * canvas.height }; 
+              const leftShoulder = { x: landmark[11].x * canvas.width, y: landmark[11].y * canvas.height }; 
+              formResultRef.current = calculateFormScore(plantHip, plantKnee, plantAnkle, leftShoulder);
             }
           }
         }
-        
-        isProcessingFrameRef.current = false;
+        prevFootPosRef.current = { x: currentX, y: currentY };
       }
-    };
-    workerRef.current.postMessage({ type: "INIT" });
-    
-    return () => {
-      workerRef.current?.terminate();
-    };
-  }, []);
+    }
+  };
+
+  const processBallResult = (balls: any[]) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!ctx || !canvas) return;
+
+    if (balls && balls.length > 0) {
+      // Pick the most confident ball or closest to foot
+      const ball = balls[0];
+      const [x, y, width, height] = ball.bbox;
+      const centerX = x + width / 2;
+      const centerY = y + height / 2;
+
+      // Draw Ball BBox
+      ctx.strokeStyle = "rgba(255, 165, 0, 0.9)";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x, y, width, height);
+      
+      // Store ball trajectory
+      ballTrajectoryRef.current.push({ x: centerX, y: centerY });
+      
+      // Draw Trajectory
+      ctx.beginPath();
+      ctx.strokeStyle = "rgba(255, 165, 0, 0.5)";
+      ctx.lineWidth = 2;
+      ballTrajectoryRef.current.forEach((point, idx) => {
+        if (idx === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      });
+      ctx.stroke();
+
+      // Advanced Impact Detection: 
+      // If we have a fast moving foot from pose, and now the ball moves fast
+      if (prevBallPosRef.current) {
+        const dx = centerX - prevBallPosRef.current.x;
+        const dy = centerY - prevBallPosRef.current.y;
+        const ballVelocity = Math.sqrt(dx * dx + dy * dy);
+        
+        // If ball velocity spikes, and we haven't locked impact yet
+        if (ballVelocity > 20 && startFootPosRef.current && impactFrameIndexRef.current === -1) {
+           const distToFoot = Math.sqrt(
+             Math.pow(centerX - startFootPosRef.current.x, 2) + 
+             Math.pow(centerY - startFootPosRef.current.y, 2)
+           );
+           
+           if (distToFoot < 200) { // foot is near the ball
+              setImpactDetected(true);
+              impactFrameIndexRef.current = frameCounterRef.current;
+              ballStartPosRef.current = { x: prevBallPosRef.current.x, y: prevBallPosRef.current.y };
+           }
+        }
+      }
+      
+      // Track ball end pos for 5 frames after impact
+      if (impactFrameIndexRef.current !== -1 && frameCounterRef.current <= impactFrameIndexRef.current + 5) {
+        ballEndPosRef.current = { x: centerX, y: centerY };
+      }
+
+      prevBallPosRef.current = { x: centerX, y: centerY };
+    }
+  };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setVideoFile(file);
       setVideoUrl(URL.createObjectURL(file));
       setAnalysisResult(null);
       setImpactDetected(false);
@@ -136,21 +209,25 @@ export default function AnalyzePage() {
   };
 
   const startAnalysis = async () => {
-    if (!videoRef.current || !canvasRef.current || !workerRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !poseWorkerRef.current || !ballWorkerRef.current) return;
     
     setIsAnalyzing(true);
     setImpactDetected(false);
-    prevFootPosRef.current = null;
-    isProcessingFrameRef.current = false;
     
-    // Reset analysis states
+    prevFootPosRef.current = null;
+    prevBallPosRef.current = null;
+    isPoseProcessingRef.current = false;
+    isBallProcessingRef.current = false;
+    ballTrajectoryRef.current = [];
+    
     frameCounterRef.current = 0;
     impactFrameIndexRef.current = -1;
     startFootPosRef.current = null;
-    endFootPosRef.current = null;
     nosePosRef.current = null;
     anklePosRef.current = null;
     formResultRef.current = null;
+    ballStartPosRef.current = null;
+    ballEndPosRef.current = null;
     
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -165,28 +242,26 @@ export default function AnalyzePage() {
       if (video.paused || video.ended) {
         setIsAnalyzing(false);
         
-        // Finalize analysis
         let finalSpeed = 0;
         let formScore = 70;
         let formRes = formResultRef.current;
-        let feedbacks: string[] = ["임팩트를 찾지 못했습니다. 전신이 잘 보이는 영상을 다시 업로드 해주세요."];
+        let feedbacks: string[] = ["임팩트를 명확히 찾지 못했습니다. 공과 전신이 잘 보이는 영상을 다시 업로드 해주세요."];
         
-        if (impactFrameIndexRef.current !== -1 && startFootPosRef.current && endFootPosRef.current && nosePosRef.current && anklePosRef.current && formRes) {
+        if (impactFrameIndexRef.current !== -1 && ballStartPosRef.current && ballEndPosRef.current && nosePosRef.current && anklePosRef.current && formRes) {
            finalSpeed = estimateSpeedKmh(
              nosePosRef.current,
              anklePosRef.current,
-             startFootPosRef.current,
-             endFootPosRef.current,
+             ballStartPosRef.current,
+             ballEndPosRef.current,
              5, // frames elapsed
              30 // fps
            );
            formScore = formRes.score;
            feedbacks = generateFeedback(formRes, finalSpeed);
         } else if (impactFrameIndexRef.current !== -1) {
-           // Fallback if some points are missing
-           formRes = { score: 75, kneeAngle: 140, torsoLeanAngle: 20 };
-           finalSpeed = 85;
-           formScore = 75;
+           formRes = formRes || { score: 75, kneeAngle: 140, torsoLeanAngle: 20 };
+           finalSpeed = 85; // Fallback
+           formScore = formRes.score;
            feedbacks = generateFeedback(formRes, finalSpeed);
         }
         
@@ -199,9 +274,7 @@ export default function AnalyzePage() {
         };
         setAnalysisResult(result);
         
-        // Save to DB in background
         try {
-          // generate a dummy device ID for MVP (in real app, use localStorage)
           const deviceId = localStorage.getItem('deviceId') || ('device_' + Math.random().toString(36).substring(7));
           localStorage.setItem('deviceId', deviceId);
           
@@ -216,6 +289,19 @@ export default function AnalyzePage() {
               kickType: result.kickType,
             })
           }).catch(console.error);
+
+          // Upload video if opted in
+          if (optIn && videoFile) {
+            const formData = new FormData();
+            formData.append('video', videoFile);
+            formData.append('deviceId', deviceId);
+            formData.append('speed', finalSpeed.toString());
+            
+            fetch('/api/dataset/upload', {
+              method: 'POST',
+              body: formData
+            }).catch(console.error);
+          }
         } catch (e) {
           console.error(e);
         }
@@ -223,17 +309,35 @@ export default function AnalyzePage() {
         return;
       }
 
-      if (!isProcessingFrameRef.current) {
+      // We clear canvas every frame here, but workers return async, which might cause flickering.
+      // For MVP, we clear it here and let workers draw when ready. 
+      // If we want no flicker, we should await both workers, but that slows down video playback.
+      const ctx = canvas.getContext("2d");
+      ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      frameCounterRef.current += 1;
+
+      if (!isPoseProcessingRef.current && !isBallProcessingRef.current) {
         try {
-          isProcessingFrameRef.current = true;
-          const imageBitmap = await createImageBitmap(video);
-          workerRef.current?.postMessage({
+          isPoseProcessingRef.current = true;
+          isBallProcessingRef.current = true;
+          
+          const imageBitmap1 = await createImageBitmap(video);
+          const imageBitmap2 = await createImageBitmap(video);
+          
+          poseWorkerRef.current?.postMessage({
             type: "DETECT",
-            imageBitmap,
+            imageBitmap: imageBitmap1,
             timestamp: performance.now()
-          }, [imageBitmap]); 
+          }, [imageBitmap1]); 
+
+          ballWorkerRef.current?.postMessage({
+            type: "DETECT",
+            imageBitmap: imageBitmap2,
+            timestamp: performance.now()
+          }, [imageBitmap2]);
         } catch {
-          isProcessingFrameRef.current = false;
+          isPoseProcessingRef.current = false;
+          isBallProcessingRef.current = false;
         }
       }
 
@@ -254,7 +358,6 @@ export default function AnalyzePage() {
       
       canvas.toBlob(async (blob) => {
         if (!blob) throw new Error('Canvas to Blob failed');
-        
         const file = new File([blob], 'freekick-result.png', { type: 'image/png' });
         
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -265,16 +368,13 @@ export default function AnalyzePage() {
               files: [file]
             });
           } catch (shareErr) {
-            console.error('Share failed, attempting fallback download', shareErr);
             triggerDownload(blob);
           }
         } else {
-          // Fallback download
           triggerDownload(blob);
         }
       }, 'image/png');
     } catch (error) {
-      console.error('Error generating share card:', error);
       alert('Failed to generate image. Please try again.');
     } finally {
       setIsSharing(false);
@@ -307,16 +407,43 @@ export default function AnalyzePage() {
 
       <main className="flex-1 w-full max-w-4xl mx-auto flex flex-col items-center">
         {!videoUrl ? (
-          <label className="w-full max-w-2xl aspect-video border-2 border-dashed border-white/20 rounded-3xl flex flex-col items-center justify-center bg-white/5 backdrop-blur-sm hover:border-[var(--color-neon-green)]/50 transition-colors cursor-pointer group mt-12">
-            <input type="file" accept="video/*" capture="environment" className="hidden" onChange={handleFileUpload} />
-            <div className="w-16 h-16 rounded-full bg-white/10 flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform group-hover:bg-[var(--color-neon-green)]/20 group-hover:text-[var(--color-neon-green)]">
-              <Upload size={32} />
+          <div className="w-full max-w-2xl mt-12 flex flex-col gap-6">
+            <div className="bg-white/5 backdrop-blur-sm border border-white/20 rounded-3xl p-8 flex flex-col items-center">
+              <h2 className="text-2xl font-bold mb-2">Upload your Freekick Video</h2>
+              <p className="text-gray-400 text-sm max-w-sm text-center mb-8">
+                Make sure your full body and the ball are visible. We recommend recording at 60fps or higher.
+              </p>
+              
+              <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
+                <label className="flex-1 flex flex-col items-center justify-center gap-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl p-4 cursor-pointer transition-colors group">
+                  <input type="file" accept="video/*" capture="environment" className="hidden" onChange={handleFileUpload} />
+                  <span className="text-[var(--color-neon-green)] group-hover:scale-110 transition-transform text-2xl">📸</span>
+                  <span className="font-bold text-sm">카메라로 촬영</span>
+                </label>
+                
+                <label className="flex-1 flex flex-col items-center justify-center gap-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl p-4 cursor-pointer transition-colors group">
+                  <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+                  <span className="text-[var(--color-neon-blue)] group-hover:scale-110 transition-transform text-2xl">🖼️</span>
+                  <span className="font-bold text-sm">앨범에서 선택</span>
+                </label>
+              </div>
             </div>
-            <h2 className="text-2xl font-bold mb-2">Upload your Freekick Video</h2>
-            <p className="text-gray-400 text-sm max-w-sm text-center">
-              Make sure your full body and the ball are visible. We recommend recording at 60fps or higher.
-            </p>
-          </label>
+
+            <label className="flex items-start gap-3 p-4 bg-white/5 border border-white/10 rounded-xl cursor-pointer hover:bg-white/10 transition-colors">
+              <input 
+                type="checkbox" 
+                className="mt-1 w-5 h-5 accent-[var(--color-neon-green)] cursor-pointer"
+                checked={optIn}
+                onChange={(e) => setOptIn(e.target.checked)}
+              />
+              <div className="flex flex-col">
+                <span className="font-bold text-sm text-white">AI 학습 데이터 제공 동의 (선택)</span>
+                <span className="text-xs text-gray-400 mt-1">
+                  동의 시 업로드하신 영상이 안전하게 저장되며, 더 정확한 프리킥 전용 AI 모델(자가개발)을 훈련하는 데 사용됩니다.
+                </span>
+              </div>
+            </label>
+          </div>
         ) : (
           <div className="w-full flex flex-col items-center gap-8">
             <div className="relative w-full max-w-3xl bg-black rounded-xl overflow-hidden border border-white/10 shadow-[0_0_30px_rgba(0,0,0,0.5)]">
@@ -417,7 +544,6 @@ export default function AnalyzePage() {
         )}
       </main>
 
-      {/* Hidden Share Card for html2canvas */}
       <div className="absolute -left-[9999px] -top-[9999px]">
         {analysisResult && (
           <ShareCard 
