@@ -499,21 +499,21 @@ export default function AnalyzePage() {
             {analysisResult && (
               <div className="w-full max-w-3xl flex flex-col gap-6 animate-in slide-in-from-bottom-8 fade-in duration-700">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="glass-card p-6 flex flex-col items-center text-center border-t-4 border-t-[var(--color-neon-green)]">
-                    <div className="text-gray-400 text-sm mb-2 font-mono">ESTIMATED SPEED</div>
-                    <div className="text-4xl font-black text-white">{analysisResult.estimatedSpeedKmh}</div>
-                    <div className="text-sm text-[var(--color-neon-green)] mt-1 font-mono">km/h</div>
+                  <div className="glass-card p-6 flex flex-col items-center text-center border-t-4 border-t-[var(--color-neon-green)] hover:-translate-y-2 transition-transform duration-300 shadow-[0_0_20px_rgba(57,255,20,0.1)] hover:shadow-[0_0_30px_rgba(57,255,20,0.3)]">
+                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">ESTIMATED SPEED</div>
+                    <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.estimatedSpeedKmh}</div>
+                    <div className="text-sm text-[var(--color-neon-green)] mt-2 font-mono font-bold tracking-widest">km/h</div>
                   </div>
                   
-                  <div className="glass-card p-6 flex flex-col items-center text-center border-t-4 border-t-[var(--color-neon-blue)]">
-                    <div className="text-gray-400 text-sm mb-2 font-mono">FORM SCORE</div>
-                    <div className="text-4xl font-black text-white">{analysisResult.formResult.score}</div>
-                    <div className="text-sm text-[var(--color-neon-blue)] mt-1 font-mono">/ 100 pts</div>
+                  <div className="glass-card p-6 flex flex-col items-center text-center border-t-4 border-t-[var(--color-neon-blue)] hover:-translate-y-2 transition-transform duration-300 shadow-[0_0_20px_rgba(0,255,255,0.1)] hover:shadow-[0_0_30px_rgba(0,255,255,0.3)]">
+                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">FORM SCORE</div>
+                    <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.formResult.score}</div>
+                    <div className="text-sm text-[var(--color-neon-blue)] mt-2 font-mono font-bold tracking-widest">/ 100 pts</div>
                   </div>
 
-                  <div className="glass-card p-6 flex flex-col items-center justify-center text-center border-t-4 border-t-white/20 relative">
-                    <div className="text-gray-400 text-sm mb-2 font-mono">KICK TYPE</div>
-                    <div className="text-xl font-bold text-white">{analysisResult.kickType}</div>
+                  <div className="glass-card p-6 flex flex-col items-center justify-center text-center border-t-4 border-t-purple-500 hover:-translate-y-2 transition-transform duration-300 shadow-[0_0_20px_rgba(168,85,247,0.1)] hover:shadow-[0_0_30px_rgba(168,85,247,0.3)] relative group">
+                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">KICK TYPE</div>
+                    <div className="text-2xl font-bold text-white group-hover:text-purple-400 transition-colors">{analysisResult.kickType}</div>
                     <button 
                       onClick={handleShare}
                       disabled={isSharing}
@@ -537,6 +537,16 @@ export default function AnalyzePage() {
                       </li>
                     ))}
                   </ul>
+                </div>
+
+                <div className="flex justify-center mt-6">
+                  <button 
+                    onClick={() => { setVideoUrl(null); setAnalysisResult(null); }} 
+                    className="px-8 py-4 rounded-full font-bold bg-gradient-to-r from-white/10 to-white/5 hover:from-[var(--color-neon-green)]/20 hover:to-[var(--color-neon-blue)]/20 border border-white/20 hover:border-white/40 transition-all hover:-translate-y-1 hover:shadow-[0_10px_40px_-10px_rgba(255,255,255,0.2)] flex items-center gap-3"
+                  >
+                    <ArrowLeft size={20} />
+                    다른 영상 분석하기
+                  </button>
                 </div>
               </div>
             )}

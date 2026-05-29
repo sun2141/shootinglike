@@ -18,7 +18,7 @@ self.onmessage = async (e) => {
     const { imageBitmap, timestamp } = e.data;
     
     try {
-      const predictions = await model.detect(imageBitmap);
+      const predictions = await model.detect(imageBitmap, 50, 0.25);
       // 'sports ball' is class ID 32 in COCO, but string is 'sports ball'
       const ballPredictions = predictions.filter(p => p.class === 'sports ball');
       
