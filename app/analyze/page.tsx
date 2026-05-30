@@ -23,11 +23,15 @@ import { ShareCard } from "@/components/ShareCard";
 import html2canvas from "html2canvas";
 
 const MAX_CLIENT_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
-const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 900;
-const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 600;
-const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 180;
+const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 450;
+const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 320;
+const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 360;
 const MAX_TRAJECTORY_POINTS = 90;
 const VIDEO_READY_TIMEOUT_MS = 12000;
+const ANALYSIS_SAMPLE_FPS = 12;
+const MAX_ANALYSIS_SECONDS = 14;
+const MAX_ANALYSIS_FRAMES = 168;
+const FRAME_WORKER_TIMEOUT_MS = 7000;
 
 type FootSide = "left" | "right";
 type Confidence = "high" | "partial" | "failed";
@@ -50,6 +54,7 @@ interface BallPrediction {
   bbox: number[];
   score?: number;
   class?: string;
+  source?: "coco" | "motion";
 }
 
 interface VisionWorkerMessage {
@@ -94,7 +99,11 @@ function getBallCenter(ball: BallPrediction): Point | null {
   };
 }
 
-function selectBallCandidate(balls: BallPrediction[], activeFoot: Point | null): BallPrediction | null {
+function selectBallCandidate(
+  balls: BallPrediction[],
+  activeFoot: Point | null,
+  previousBall: Point | null
+): BallPrediction | null {
   let selected: BallPrediction | null = null;
   let selectedScore = Number.NEGATIVE_INFINITY;
 
@@ -103,8 +112,10 @@ function selectBallCandidate(balls: BallPrediction[], activeFoot: Point | null):
     if (!center) continue;
 
     const modelScore = ball.score ?? 0.5;
-    const footDistancePenalty = activeFoot ? calculateDistance(center, activeFoot) * 0.003 : 0;
-    const rankingScore = modelScore - footDistancePenalty;
+    const previousDistancePenalty = previousBall ? Math.min(1.5, calculateDistance(center, previousBall) * 0.004) : 0;
+    const footDistancePenalty = !previousBall && activeFoot ? Math.min(0.8, calculateDistance(center, activeFoot) * 0.0015) : 0;
+    const sourceBonus = ball.source === "coco" ? 0.25 : 0;
+    const rankingScore = modelScore + sourceBonus - previousDistancePenalty - footDistancePenalty;
 
     if (rankingScore > selectedScore) {
       selected = ball;
@@ -113,6 +124,45 @@ function selectBallCandidate(balls: BallPrediction[], activeFoot: Point | null):
   }
 
   return selected;
+}
+
+function waitForVideoSeek(video: HTMLVideoElement, timeSeconds: number): Promise<void> {
+  const targetTime = Math.max(0, Math.min(timeSeconds, Number.isFinite(video.duration) ? video.duration : timeSeconds));
+  if (Math.abs(video.currentTime - targetTime) < 0.015 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      video.removeEventListener("seeked", handleSeeked);
+      video.removeEventListener("error", handleError);
+      window.clearTimeout(timeoutId);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const handleSeeked = () => finish();
+    const handleError = () => finish(new Error("Video seek failed."));
+    const timeoutId = window.setTimeout(() => finish(new Error("Video seek timed out.")), 5000);
+
+    video.addEventListener("seeked", handleSeeked);
+    video.addEventListener("error", handleError);
+
+    try {
+      if ("fastSeek" in video && typeof video.fastSeek === "function") {
+        video.fastSeek(targetTime);
+      } else {
+        video.currentTime = targetTime;
+      }
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error("Video seek failed."));
+    }
+  });
 }
 
 function getOrCreateDeviceId(): string {
@@ -244,6 +294,7 @@ export default function AnalyzePage() {
   const isModelLoading = isPoseLoading || isBallLoading;
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [impactDetected, setImpactDetected] = useState(false);
 
@@ -281,6 +332,8 @@ export default function AnalyzePage() {
   const ballEndPosRef = useRef<Point | null>(null);
   const ballEndTimeMsRef = useRef<number | null>(null);
   const ballTrajectoryRef = useRef<Point[]>([]);
+  const poseDetectionsRef = useRef(0);
+  const ballDetectionsRef = useRef(0);
 
   const resetTrackingRefs = useCallback(() => {
     prevFootSamplesRef.current = {};
@@ -301,6 +354,8 @@ export default function AnalyzePage() {
     ballStartTimeMsRef.current = null;
     ballEndPosRef.current = null;
     ballEndTimeMsRef.current = null;
+    poseDetectionsRef.current = 0;
+    ballDetectionsRef.current = 0;
   }, []);
 
   const revokeCurrentVideoUrl = useCallback(() => {
@@ -314,6 +369,8 @@ export default function AnalyzePage() {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!ctx || !canvas || landmarks.length === 0) return;
+
+    poseDetectionsRef.current += 1;
 
     for (const landmark of landmarks) {
       drawLandmarks(ctx, landmark);
@@ -361,8 +418,7 @@ export default function AnalyzePage() {
 
       if (
         fastestFoot &&
-        fastestFoot.velocityPxPerSecond > FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND &&
-        impactFrameIndexRef.current === -1
+        fastestFoot.velocityPxPerSecond > FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND
       ) {
         const plant = PLANT_LANDMARKS_BY_KICKING_FOOT[fastestFoot.side];
         const nose = toCanvasPoint(landmark[0], canvas);
@@ -379,6 +435,9 @@ export default function AnalyzePage() {
         if (plantHip && plantKnee && plantAnkle && plantShoulder) {
           formResultRef.current = calculateFormScore(plantHip, plantKnee, plantAnkle, plantShoulder);
         }
+      } else if (fastestFoot) {
+        activeFootPosRef.current = fastestFoot.point;
+        activeFootSideRef.current = fastestFoot.side;
       }
     }
   }, []);
@@ -388,14 +447,16 @@ export default function AnalyzePage() {
     const ctx = canvas?.getContext("2d");
     if (!ctx || !canvas || balls.length === 0) return;
 
-    const ball = selectBallCandidate(balls, activeFootPosRef.current);
+    const ball = selectBallCandidate(balls, activeFootPosRef.current, prevBallSampleRef.current);
     if (!ball) return;
 
     const center = getBallCenter(ball);
     if (!center || ball.bbox.length < 4) return;
 
+    ballDetectionsRef.current += 1;
+
     const [x, y, width, height] = ball.bbox;
-    ctx.strokeStyle = "rgba(255, 165, 0, 0.9)";
+    ctx.strokeStyle = ball.source === "motion" ? "rgba(4, 217, 255, 0.9)" : "rgba(255, 165, 0, 0.9)";
     ctx.lineWidth = 3;
     ctx.strokeRect(x, y, width, height);
 
@@ -420,13 +481,15 @@ export default function AnalyzePage() {
 
       if (
         ballVelocityPxPerSecond > BALL_VELOCITY_THRESHOLD_PX_PER_SECOND &&
-        activeFootPosRef.current &&
         impactFrameIndexRef.current === -1
       ) {
-        const distToFoot = calculateDistance(center, activeFootPosRef.current);
+        const activeFoot = activeFootPosRef.current;
+        const distToFoot = activeFoot ? calculateDistance(center, activeFoot) : Number.POSITIVE_INFINITY;
         const impactDistanceThreshold = Math.max(100, Math.min(260, canvas.width * 0.22));
+        const hasFootConfirmation = activeFoot ? distToFoot < impactDistanceThreshold : false;
+        const hasBallOnlyConfirmation = !activeFoot || poseDetectionsRef.current < 3;
 
-        if (distToFoot < impactDistanceThreshold) {
+        if (hasFootConfirmation || hasBallOnlyConfirmation) {
           setImpactDetected(true);
           impactFrameIndexRef.current = frameCounterRef.current;
           impactTimeMsRef.current = timestampMs;
@@ -595,6 +658,7 @@ export default function AnalyzePage() {
       setVideoUrl(nextUrl);
       setAnalysisResult(null);
       setImpactDetected(false);
+      setAnalysisProgress(0);
       setIsAnalyzing(false);
     },
     [resetTrackingRefs, revokeCurrentVideoUrl]
@@ -613,6 +677,7 @@ export default function AnalyzePage() {
     setVideoUrl(null);
     setAnalysisResult(null);
     setImpactDetected(false);
+    setAnalysisProgress(0);
     setIsAnalyzing(false);
   }, [resetTrackingRefs, revokeCurrentVideoUrl]);
 
@@ -667,6 +732,14 @@ export default function AnalyzePage() {
       ];
     }
 
+    if (confidence === "failed" && ballDetectionsRef.current > 0) {
+      confidence = "partial";
+      feedbacks = [
+        `공 후보 ${ballDetectionsRef.current}개 프레임을 추적했지만, 전신 기준점이 부족해 구속은 산출하지 않았습니다.`,
+        "공과 키커 전신이 같은 화면에 더 크게 보이도록 촬영하면 속도 산출이 안정적입니다.",
+      ];
+    }
+
     const kickType =
       activeFootSideRef.current === "left"
         ? "Left-foot Instep"
@@ -682,6 +755,36 @@ export default function AnalyzePage() {
       kickType,
       confidence,
     };
+  }, []);
+
+  const waitForWorkerFrame = useCallback((runId: number): Promise<boolean> => {
+    return new Promise((resolve) => {
+      const startedAt = performance.now();
+
+      const check = () => {
+        if (analysisRunIdRef.current !== runId) {
+          resolve(false);
+          return;
+        }
+
+        if (!isPoseProcessingRef.current && !isBallProcessingRef.current) {
+          resolve(true);
+          return;
+        }
+
+        if (performance.now() - startedAt > FRAME_WORKER_TIMEOUT_MS) {
+          console.warn("Frame analysis timed out");
+          isPoseProcessingRef.current = false;
+          isBallProcessingRef.current = false;
+          resolve(false);
+          return;
+        }
+
+        requestAnimationFrame(check);
+      };
+
+      check();
+    });
   }, []);
 
   const startAnalysis = useCallback(async () => {
@@ -702,12 +805,14 @@ export default function AnalyzePage() {
     resetTrackingRefs();
     setAnalysisResult(null);
     setImpactDetected(false);
+    setAnalysisProgress(0);
     setIsAnalyzing(true);
 
     try {
       await waitForVideoData(video);
+      video.pause();
       video.currentTime = 0;
-      await video.play();
+      await waitForVideoSeek(video, 0);
     } catch (error) {
       console.error("Failed to start video analysis", error);
       setIsAnalyzing(false);
@@ -731,19 +836,26 @@ export default function AnalyzePage() {
       persistAnalysis(result);
     };
 
-    const renderLoop = async () => {
-      if (analysisRunIdRef.current !== runId) return;
-
-      if (video.paused || video.ended) {
-        finishAnalysis();
-        return;
-      }
-
+    const processFrames = async () => {
       const ctx = canvas.getContext("2d");
-      ctx?.clearRect(0, 0, canvas.width, canvas.height);
-      frameCounterRef.current += 1;
+      const sourceDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : MAX_ANALYSIS_SECONDS;
+      const analysisDuration = Math.min(sourceDuration, MAX_ANALYSIS_SECONDS);
+      const sampleInterval = Math.max(1 / ANALYSIS_SAMPLE_FPS, analysisDuration / MAX_ANALYSIS_FRAMES);
+      const totalFrames = Math.max(1, Math.min(MAX_ANALYSIS_FRAMES, Math.floor(analysisDuration / sampleInterval) + 1));
 
-      if (!isPoseProcessingRef.current && !isBallProcessingRef.current) {
+      ballWorker.postMessage({ type: "RESET" });
+
+      for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+        if (analysisRunIdRef.current !== runId) return;
+
+        const targetTime = Math.min(analysisDuration, frameIndex * sampleInterval);
+        await waitForVideoSeek(video, targetTime);
+
+        if (analysisRunIdRef.current !== runId) return;
+
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+        frameCounterRef.current += 1;
+
         let poseFrame: WorkerFrame | null = null;
         let ballFrame: WorkerFrame | null = null;
 
@@ -751,7 +863,7 @@ export default function AnalyzePage() {
           isPoseProcessingRef.current = true;
           isBallProcessingRef.current = true;
 
-          const timestamp = video.currentTime * 1000;
+          const timestamp = targetTime * 1000;
           poseFrame = await createWorkerFrame(video, frameCaptureCanvas);
           ballFrame = await createWorkerFrame(video, frameCaptureCanvas);
 
@@ -782,6 +894,8 @@ export default function AnalyzePage() {
             getFrameTransferList(ballFrame)
           );
           ballFrame = null;
+
+          await waitForWorkerFrame(runId);
         } catch (error) {
           console.error("Frame dispatch failed", error);
           closeWorkerFrame(poseFrame);
@@ -789,13 +903,23 @@ export default function AnalyzePage() {
           isPoseProcessingRef.current = false;
           isBallProcessingRef.current = false;
         }
+
+        setAnalysisProgress(Math.round(((frameIndex + 1) / totalFrames) * 100));
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       }
 
-      animationFrameRef.current = requestAnimationFrame(renderLoop);
+      finishAnalysis();
     };
 
-    animationFrameRef.current = requestAnimationFrame(renderLoop);
-  }, [buildFinalResult, isModelLoading, modelError, persistAnalysis, resetTrackingRefs]);
+    processFrames().catch((error) => {
+      console.error("Analysis loop failed", error);
+      if (analysisRunIdRef.current !== runId) return;
+      setIsAnalyzing(false);
+      isPoseProcessingRef.current = false;
+      isBallProcessingRef.current = false;
+      alert("분석 중 오류가 발생했습니다. 다른 영상으로 다시 시도해 주세요.");
+    });
+  }, [buildFinalResult, isModelLoading, modelError, persistAnalysis, resetTrackingRefs, waitForWorkerFrame]);
 
   const handleShare = async () => {
     if (!shareCardRef.current || !analysisResult || analysisResult.confidence === "failed") return;
@@ -927,7 +1051,7 @@ export default function AnalyzePage() {
               {isAnalyzing && (
                 <div className="absolute top-4 right-4 bg-black/50 backdrop-blur-md px-4 py-2 rounded-full flex items-center gap-2 border border-white/10 text-sm font-mono text-[var(--color-neon-green)]">
                   <Activity size={16} className="animate-pulse" />
-                  ANALYZING...
+                  ANALYZING {analysisProgress}%
                 </div>
               )}
 
