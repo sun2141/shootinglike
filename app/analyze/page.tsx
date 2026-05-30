@@ -27,9 +27,11 @@ const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 900;
 const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 600;
 const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 180;
 const MAX_TRAJECTORY_POINTS = 90;
+const VIDEO_READY_TIMEOUT_MS = 12000;
 
 type FootSide = "left" | "right";
 type Confidence = "high" | "partial" | "failed";
+type WorkerFrame = ImageBitmap | ImageData;
 
 interface AnalysisResult {
   framesAnalyzed: number;
@@ -126,26 +128,103 @@ function getOrCreateDeviceId(): string {
   return deviceId;
 }
 
-function waitForVideoData(video: HTMLVideoElement): Promise<void> {
-  if (video.readyState >= 2) return Promise.resolve();
+function waitForVideoData(video: HTMLVideoElement, timeoutMs = VIDEO_READY_TIMEOUT_MS): Promise<void> {
+  const hasCurrentFrame = () => video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+  if (hasCurrentFrame()) return Promise.resolve();
 
   return new Promise((resolve, reject) => {
+    let settled = false;
     const cleanup = () => {
       video.removeEventListener("loadeddata", handleLoaded);
+      video.removeEventListener("canplay", handleLoaded);
+      video.removeEventListener("canplaythrough", handleLoaded);
       video.removeEventListener("error", handleError);
+      window.clearTimeout(timeoutId);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
     };
     const handleLoaded = () => {
-      cleanup();
-      resolve();
+      if (!hasCurrentFrame()) return;
+      finish();
     };
     const handleError = () => {
-      cleanup();
-      reject(new Error("Video metadata could not be loaded."));
+      finish(new Error("Video data could not be loaded."));
     };
+    const timeoutId = window.setTimeout(() => {
+      finish(new Error("Video data load timed out."));
+    }, timeoutMs);
 
     video.addEventListener("loadeddata", handleLoaded);
+    video.addEventListener("canplay", handleLoaded);
+    video.addEventListener("canplaythrough", handleLoaded);
     video.addEventListener("error", handleError);
+
+    try {
+      video.load();
+    } catch {
+      // Some browsers throw when load() is called on transient blob URLs.
+    }
+
+    if (hasCurrentFrame()) {
+      finish();
+    }
   });
+}
+
+async function createWorkerFrame(
+  video: HTMLVideoElement,
+  fallbackCanvas: HTMLCanvasElement
+): Promise<WorkerFrame> {
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(video);
+    } catch {
+      // Safari and some mobile browsers cannot create ImageBitmap directly from video.
+    }
+  }
+
+  const width = video.videoWidth || video.clientWidth;
+  const height = video.videoHeight || video.clientHeight;
+  if (width <= 0 || height <= 0) {
+    throw new Error("Video frame has no drawable dimensions.");
+  }
+
+  if (fallbackCanvas.width !== width) fallbackCanvas.width = width;
+  if (fallbackCanvas.height !== height) fallbackCanvas.height = height;
+
+  const ctx = fallbackCanvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Could not create frame capture canvas.");
+
+  ctx.drawImage(video, 0, 0, width, height);
+
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(fallbackCanvas);
+    } catch {
+      // Fall through to ImageData for browsers without transferable ImageBitmap support.
+    }
+  }
+
+  return ctx.getImageData(0, 0, width, height);
+}
+
+function closeWorkerFrame(frame: WorkerFrame | null) {
+  if (frame && "close" in frame && typeof frame.close === "function") {
+    frame.close();
+  }
+}
+
+function getFrameTransferList(frame: WorkerFrame): Transferable[] {
+  if ("close" in frame) {
+    return [frame];
+  }
+
+  return [];
 }
 
 function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -175,6 +254,7 @@ export default function AnalyzePage() {
   const shareCardRef = useRef<HTMLDivElement>(null);
   const animationFrameRef = useRef<number | null>(null);
   const videoUrlRef = useRef<string | null>(null);
+  const frameCaptureCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [isSharing, setIsSharing] = useState(false);
   const [optIn, setOptIn] = useState(false);
@@ -631,12 +711,14 @@ export default function AnalyzePage() {
     } catch (error) {
       console.error("Failed to start video analysis", error);
       setIsAnalyzing(false);
-      alert("영상을 재생할 수 없습니다. 다른 파일을 선택해 주세요.");
+      alert("영상 데이터를 불러오지 못했습니다. 짧은 MP4/MOV 파일로 다시 시도해 주세요.");
       return;
     }
 
     canvas.width = video.videoWidth || canvas.clientWidth;
     canvas.height = video.videoHeight || canvas.clientHeight;
+    const frameCaptureCanvas = frameCaptureCanvasRef.current ?? document.createElement("canvas");
+    frameCaptureCanvasRef.current = frameCaptureCanvas;
 
     const finishAnalysis = () => {
       if (analysisRunIdRef.current !== runId) return;
@@ -662,41 +744,48 @@ export default function AnalyzePage() {
       frameCounterRef.current += 1;
 
       if (!isPoseProcessingRef.current && !isBallProcessingRef.current) {
+        let poseFrame: WorkerFrame | null = null;
+        let ballFrame: WorkerFrame | null = null;
+
         try {
           isPoseProcessingRef.current = true;
           isBallProcessingRef.current = true;
 
           const timestamp = video.currentTime * 1000;
-          const imageBitmap1 = await createImageBitmap(video);
-          const imageBitmap2 = await createImageBitmap(video);
+          poseFrame = await createWorkerFrame(video, frameCaptureCanvas);
+          ballFrame = await createWorkerFrame(video, frameCaptureCanvas);
 
           if (analysisRunIdRef.current !== runId) {
-            imageBitmap1.close();
-            imageBitmap2.close();
+            closeWorkerFrame(poseFrame);
+            closeWorkerFrame(ballFrame);
             return;
           }
 
           poseWorker.postMessage(
             {
               type: "DETECT",
-              imageBitmap: imageBitmap1,
+              imageBitmap: poseFrame,
               timestamp,
               requestId: runId,
             },
-            [imageBitmap1]
+            getFrameTransferList(poseFrame)
           );
+          poseFrame = null;
 
           ballWorker.postMessage(
             {
               type: "DETECT",
-              imageBitmap: imageBitmap2,
+              imageBitmap: ballFrame,
               timestamp,
               requestId: runId,
             },
-            [imageBitmap2]
+            getFrameTransferList(ballFrame)
           );
+          ballFrame = null;
         } catch (error) {
           console.error("Frame dispatch failed", error);
+          closeWorkerFrame(poseFrame);
+          closeWorkerFrame(ballFrame);
           isPoseProcessingRef.current = false;
           isBallProcessingRef.current = false;
         }
@@ -825,6 +914,7 @@ export default function AnalyzePage() {
                 crossOrigin="anonymous"
                 playsInline
                 muted
+                preload="auto"
                 onLoadedMetadata={(e) => {
                   if (canvasRef.current) {
                     canvasRef.current.width = e.currentTarget.videoWidth;
@@ -860,7 +950,7 @@ export default function AnalyzePage() {
                   className="px-8 py-3 rounded-full font-bold bg-white text-black hover:scale-105 transition-transform disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {isModelLoading ? <Loader2 className="animate-spin" size={20} /> : <Play size={20} />}
-                  Start AI Analysis
+                  {isModelLoading ? "Loading AI Models" : "Start AI Analysis"}
                 </button>
               </div>
             )}

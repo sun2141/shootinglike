@@ -3,6 +3,12 @@ import { FilesetResolver, PoseLandmarker, type NormalizedLandmark } from "@media
 let poseLandmarker: PoseLandmarker | null = null;
 let isLoading = false;
 
+function closeImageSource(imageSource: ImageBitmap | ImageData) {
+  if ("close" in imageSource && typeof imageSource.close === "function") {
+    imageSource.close();
+  }
+}
+
 async function initPoseLandmarker() {
   if (poseLandmarker || isLoading) return;
   isLoading = true;
@@ -45,7 +51,7 @@ self.onmessage = async (e: MessageEvent) => {
   } 
   else if (type === "DETECT" && imageBitmap) {
     if (!poseLandmarker) {
-      imageBitmap.close();
+      closeImageSource(imageBitmap);
       self.postMessage({ type: "DETECT_RESULT", landmarks: [], timestamp, requestId });
       return;
     }
@@ -69,8 +75,7 @@ self.onmessage = async (e: MessageEvent) => {
       console.error("Detection error:", err);
       self.postMessage({ type: "DETECT_RESULT", landmarks: [], timestamp, requestId });
     } finally {
-      // Must close ImageBitmap to prevent memory leaks in Web Workers
-      imageBitmap.close();
+      closeImageSource(imageBitmap);
     }
   }
 };

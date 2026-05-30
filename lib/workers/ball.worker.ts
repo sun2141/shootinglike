@@ -4,6 +4,12 @@ import * as cocoSsd from '@tensorflow-models/coco-ssd';
 let model: cocoSsd.ObjectDetection | null = null;
 let isLoading = false;
 
+function closeImageSource(imageSource: ImageBitmap | ImageData | undefined) {
+  if (imageSource && "close" in imageSource && typeof imageSource.close === "function") {
+    imageSource.close();
+  }
+}
+
 self.onmessage = async (e) => {
   const { type } = e.data;
 
@@ -23,9 +29,7 @@ self.onmessage = async (e) => {
     const { imageBitmap, timestamp, requestId } = e.data;
 
     if (!model) {
-      if (imageBitmap && imageBitmap.close) {
-        imageBitmap.close();
-      }
+      closeImageSource(imageBitmap);
       self.postMessage({ type: "DETECT_RESULT", balls: [], timestamp, requestId });
       return;
     }
@@ -45,9 +49,7 @@ self.onmessage = async (e) => {
       console.error("Ball detection error:", error);
       self.postMessage({ type: "DETECT_RESULT", balls: [], timestamp, requestId });
     } finally {
-      if (imageBitmap && imageBitmap.close) {
-        imageBitmap.close();
-      }
+      closeImageSource(imageBitmap);
     }
   }
 };
