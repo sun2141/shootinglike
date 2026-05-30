@@ -11,6 +11,17 @@ export function estimateSpeedKmh(
   framesElapsed: number,
   fps: number = 30 
 ): number {
+  const timeSeconds = framesElapsed / fps;
+  return estimateSpeedKmhFromSeconds(nose, ankle, ballStart, ballEnd, timeSeconds);
+}
+
+export function estimateSpeedKmhFromSeconds(
+  nose: Point,
+  ankle: Point,
+  ballStart: Point,
+  ballEnd: Point,
+  timeSeconds: number
+): number {
   // 1. Calculate pixels per meter based on user body
   const bodyPixels = calculateDistance(nose, ankle);
   if (bodyPixels === 0) return 0;
@@ -24,8 +35,7 @@ export function estimateSpeedKmh(
   const travelMeters = travelPixels / pixelsPerMeter;
   
   // 4. Calculate time elapsed in seconds
-  const timeSeconds = framesElapsed / fps;
-  if (timeSeconds === 0) return 0;
+  if (!Number.isFinite(timeSeconds) || timeSeconds <= 0) return 0;
   
   // 5. Calculate speed in m/s, then convert to km/h
   const speedMs = travelMeters / timeSeconds;
