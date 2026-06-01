@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { drawLandmarks, drawConnectors } from "@/lib/canvas-utils";
-import { PoseLandmarker, type NormalizedLandmark } from "@mediapipe/tasks-vision";
+import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import { estimateSpeedKmhFromSeconds } from "@/lib/analysis/speed";
 import { calculateFormScore, type FormResult } from "@/lib/analysis/form";
 import { generateFeedback } from "@/lib/analysis/feedback";
@@ -23,8 +23,9 @@ import { ShareCard } from "@/components/ShareCard";
 import html2canvas from "html2canvas";
 
 const MAX_CLIENT_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
-const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 450;
-const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 320;
+const MAX_ANALYSIS_DIMENSION_PX = 960;
+const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 300;
+const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 220;
 const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 360;
 const MAX_TRAJECTORY_POINTS = 90;
 const VIDEO_READY_TIMEOUT_MS = 12000;
@@ -32,6 +33,9 @@ const ANALYSIS_SAMPLE_FPS = 12;
 const MAX_ANALYSIS_SECONDS = 14;
 const MAX_ANALYSIS_FRAMES = 168;
 const FRAME_WORKER_TIMEOUT_MS = 7000;
+const OPT_IN_STORAGE_KEY = "freekickDataOptIn";
+const PLAYER_HEIGHT_STORAGE_KEY = "freekickPlayerHeightCm";
+const DEFAULT_PLAYER_HEIGHT_CM = 175;
 
 type FootSide = "left" | "right";
 type Confidence = "high" | "partial" | "failed";
@@ -54,7 +58,7 @@ interface BallPrediction {
   bbox: number[];
   score?: number;
   class?: string;
-  source?: "coco" | "motion";
+  source?: "motion";
 }
 
 interface VisionWorkerMessage {
@@ -65,6 +69,44 @@ interface VisionWorkerMessage {
   landmarks?: NormalizedLandmark[][];
   balls?: BallPrediction[];
 }
+
+const POSE_CONNECTIONS: Array<{ start: number; end: number }> = [
+  { start: 0, end: 1 },
+  { start: 1, end: 2 },
+  { start: 2, end: 3 },
+  { start: 3, end: 7 },
+  { start: 0, end: 4 },
+  { start: 4, end: 5 },
+  { start: 5, end: 6 },
+  { start: 6, end: 8 },
+  { start: 9, end: 10 },
+  { start: 11, end: 12 },
+  { start: 11, end: 13 },
+  { start: 13, end: 15 },
+  { start: 15, end: 17 },
+  { start: 15, end: 19 },
+  { start: 15, end: 21 },
+  { start: 17, end: 19 },
+  { start: 12, end: 14 },
+  { start: 14, end: 16 },
+  { start: 16, end: 18 },
+  { start: 16, end: 20 },
+  { start: 16, end: 22 },
+  { start: 18, end: 20 },
+  { start: 11, end: 23 },
+  { start: 12, end: 24 },
+  { start: 23, end: 24 },
+  { start: 23, end: 25 },
+  { start: 24, end: 26 },
+  { start: 25, end: 27 },
+  { start: 26, end: 28 },
+  { start: 27, end: 29 },
+  { start: 28, end: 30 },
+  { start: 29, end: 31 },
+  { start: 30, end: 32 },
+  { start: 27, end: 31 },
+  { start: 28, end: 32 },
+];
 
 const PLANT_LANDMARKS_BY_KICKING_FOOT: Record<
   FootSide,
@@ -114,8 +156,7 @@ function selectBallCandidate(
     const modelScore = ball.score ?? 0.5;
     const previousDistancePenalty = previousBall ? Math.min(1.5, calculateDistance(center, previousBall) * 0.004) : 0;
     const footDistancePenalty = !previousBall && activeFoot ? Math.min(0.8, calculateDistance(center, activeFoot) * 0.0015) : 0;
-    const sourceBonus = ball.source === "coco" ? 0.25 : 0;
-    const rankingScore = modelScore + sourceBonus - previousDistancePenalty - footDistancePenalty;
+    const rankingScore = modelScore - previousDistancePenalty - footDistancePenalty;
 
     if (rankingScore > selectedScore) {
       selected = ball;
@@ -228,18 +269,12 @@ function waitForVideoData(video: HTMLVideoElement, timeoutMs = VIDEO_READY_TIMEO
 
 async function createWorkerFrame(
   video: HTMLVideoElement,
-  fallbackCanvas: HTMLCanvasElement
+  fallbackCanvas: HTMLCanvasElement,
+  targetWidth: number,
+  targetHeight: number
 ): Promise<WorkerFrame> {
-  if (typeof createImageBitmap === "function") {
-    try {
-      return await createImageBitmap(video);
-    } catch {
-      // Safari and some mobile browsers cannot create ImageBitmap directly from video.
-    }
-  }
-
-  const width = video.videoWidth || video.clientWidth;
-  const height = video.videoHeight || video.clientHeight;
+  const width = targetWidth || video.videoWidth || video.clientWidth;
+  const height = targetHeight || video.videoHeight || video.clientHeight;
   if (width <= 0 || height <= 0) {
     throw new Error("Video frame has no drawable dimensions.");
   }
@@ -261,6 +296,20 @@ async function createWorkerFrame(
   }
 
   return ctx.getImageData(0, 0, width, height);
+}
+
+function getAnalysisFrameSize(video: HTMLVideoElement) {
+  const sourceWidth = video.videoWidth || video.clientWidth;
+  const sourceHeight = video.videoHeight || video.clientHeight;
+  if (sourceWidth <= 0 || sourceHeight <= 0) {
+    return { width: 0, height: 0 };
+  }
+
+  const scale = Math.min(1, MAX_ANALYSIS_DIMENSION_PX / Math.max(sourceWidth, sourceHeight));
+  return {
+    width: Math.max(1, Math.round(sourceWidth * scale)),
+    height: Math.max(1, Math.round(sourceHeight * scale)),
+  };
 }
 
 function closeWorkerFrame(frame: WorkerFrame | null) {
@@ -297,6 +346,7 @@ export default function AnalyzePage() {
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [impactDetected, setImpactDetected] = useState(false);
+  const [isPersistingAnalysis, setIsPersistingAnalysis] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -308,7 +358,22 @@ export default function AnalyzePage() {
   const frameCaptureCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [isSharing, setIsSharing] = useState(false);
-  const [optIn, setOptIn] = useState(false);
+  const [optIn, setOptIn] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return localStorage.getItem(OPT_IN_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [playerHeightCm, setPlayerHeightCm] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_PLAYER_HEIGHT_CM.toString();
+    try {
+      return localStorage.getItem(PLAYER_HEIGHT_STORAGE_KEY) ?? DEFAULT_PLAYER_HEIGHT_CM.toString();
+    } catch {
+      return DEFAULT_PLAYER_HEIGHT_CM.toString();
+    }
+  });
   const [videoFile, setVideoFile] = useState<File | null>(null);
 
   const prevFootSamplesRef = useRef<Partial<Record<FootSide, TimedPoint>>>({});
@@ -317,6 +382,9 @@ export default function AnalyzePage() {
   const isPoseProcessingRef = useRef(false);
   const isBallProcessingRef = useRef(false);
   const analysisRunIdRef = useRef(0);
+  const frameRequestIdRef = useRef(0);
+  const pendingPoseRequestIdRef = useRef<number | null>(null);
+  const pendingBallRequestIdRef = useRef<number | null>(null);
 
   const frameCounterRef = useRef(0);
   const impactFrameIndexRef = useRef(-1);
@@ -340,6 +408,8 @@ export default function AnalyzePage() {
     prevBallSampleRef.current = null;
     isPoseProcessingRef.current = false;
     isBallProcessingRef.current = false;
+    pendingPoseRequestIdRef.current = null;
+    pendingBallRequestIdRef.current = null;
     ballTrajectoryRef.current = [];
 
     frameCounterRef.current = 0;
@@ -374,7 +444,7 @@ export default function AnalyzePage() {
 
     for (const landmark of landmarks) {
       drawLandmarks(ctx, landmark);
-      drawConnectors(ctx, landmark, PoseLandmarker.POSE_CONNECTIONS, {
+      drawConnectors(ctx, landmark, POSE_CONNECTIONS, {
         color: "rgba(0, 255, 0, 0.7)",
         lineWidth: 3,
       });
@@ -456,7 +526,7 @@ export default function AnalyzePage() {
     ballDetectionsRef.current += 1;
 
     const [x, y, width, height] = ball.bbox;
-    ctx.strokeStyle = ball.source === "motion" ? "rgba(4, 217, 255, 0.9)" : "rgba(255, 165, 0, 0.9)";
+    ctx.strokeStyle = "rgba(4, 217, 255, 0.9)";
     ctx.lineWidth = 3;
     ctx.strokeRect(x, y, width, height);
 
@@ -488,8 +558,11 @@ export default function AnalyzePage() {
         const impactDistanceThreshold = Math.max(100, Math.min(260, canvas.width * 0.22));
         const hasFootConfirmation = activeFoot ? distToFoot < impactDistanceThreshold : false;
         const hasBallOnlyConfirmation = !activeFoot || poseDetectionsRef.current < 3;
+        const hasStrongBallConfirmation =
+          ballDetectionsRef.current >= 3 &&
+          ballVelocityPxPerSecond > BALL_VELOCITY_THRESHOLD_PX_PER_SECOND * 1.6;
 
-        if (hasFootConfirmation || hasBallOnlyConfirmation) {
+        if (hasFootConfirmation || hasBallOnlyConfirmation || hasStrongBallConfirmation) {
           setImpactDetected(true);
           impactFrameIndexRef.current = frameCounterRef.current;
           impactTimeMsRef.current = timestampMs;
@@ -514,6 +587,22 @@ export default function AnalyzePage() {
       timeMs: timestampMs,
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(OPT_IN_STORAGE_KEY, String(optIn));
+    } catch {
+      // Ignore storage failures; opt-in still works for the current page session.
+    }
+  }, [optIn]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PLAYER_HEIGHT_STORAGE_KEY, playerHeightCm);
+    } catch {
+      // Ignore storage failures; the current state remains usable.
+    }
+  }, [playerHeightCm]);
 
   useEffect(() => {
     let disposed = false;
@@ -545,10 +634,10 @@ export default function AnalyzePage() {
         setModelError("자세 분석 모델을 불러오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
         setIsPoseLoading(false);
       } else if (type === "DETECT_RESULT") {
+        if (requestId === undefined || requestId !== pendingPoseRequestIdRef.current) return;
+        pendingPoseRequestIdRef.current = null;
         isPoseProcessingRef.current = false;
-        if (requestId === analysisRunIdRef.current) {
-          processPoseResult(landmarks, timestamp);
-        }
+        processPoseResult(landmarks, timestamp);
       }
     };
 
@@ -563,10 +652,10 @@ export default function AnalyzePage() {
         setModelError("공 추적 모델을 불러오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
         setIsBallLoading(false);
       } else if (type === "DETECT_RESULT") {
+        if (requestId === undefined || requestId !== pendingBallRequestIdRef.current) return;
+        pendingBallRequestIdRef.current = null;
         isBallProcessingRef.current = false;
-        if (requestId === analysisRunIdRef.current) {
-          processBallResult(balls, timestamp);
-        }
+        processBallResult(balls, timestamp);
       }
     };
 
@@ -593,13 +682,13 @@ export default function AnalyzePage() {
   }, [revokeCurrentVideoUrl]);
 
   const persistAnalysis = useCallback(
-    (result: AnalysisResult) => {
+    async (result: AnalysisResult) => {
       if (result.estimatedSpeedKmh <= 0 || result.confidence === "failed") return;
 
       try {
         const deviceId = getOrCreateDeviceId();
 
-        fetch("/api/analyze", {
+        await fetch("/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -609,7 +698,7 @@ export default function AnalyzePage() {
             formScore: result.formResult.score,
             kickType: result.kickType,
           }),
-        }).catch(console.error);
+        });
 
         if (optIn && videoFile) {
           const formData = new FormData();
@@ -617,10 +706,10 @@ export default function AnalyzePage() {
           formData.append("deviceId", deviceId);
           formData.append("speed", result.estimatedSpeedKmh.toString());
 
-          fetch("/api/dataset/upload", {
+          await fetch("/api/dataset/upload", {
             method: "POST",
             body: formData,
-          }).catch(console.error);
+          });
         }
       } catch (error) {
         console.error("Failed to persist analysis", error);
@@ -660,6 +749,8 @@ export default function AnalyzePage() {
       setImpactDetected(false);
       setAnalysisProgress(0);
       setIsAnalyzing(false);
+      setIsPersistingAnalysis(false);
+      ballWorkerRef.current?.postMessage({ type: "RESET" });
     },
     [resetTrackingRefs, revokeCurrentVideoUrl]
   );
@@ -679,7 +770,23 @@ export default function AnalyzePage() {
     setImpactDetected(false);
     setAnalysisProgress(0);
     setIsAnalyzing(false);
+    setIsPersistingAnalysis(false);
+    ballWorkerRef.current?.postMessage({ type: "RESET" });
   }, [resetTrackingRefs, revokeCurrentVideoUrl]);
+
+  const reloadForAnotherVideo = useCallback(() => {
+    if (isPersistingAnalysis) return;
+    analysisRunIdRef.current += 1;
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    videoRef.current?.pause();
+    ballWorkerRef.current?.postMessage({ type: "RESET" });
+    revokeCurrentVideoUrl();
+    resetTrackingRefs();
+    window.location.reload();
+  }, [isPersistingAnalysis, resetTrackingRefs, revokeCurrentVideoUrl]);
 
   const buildFinalResult = useCallback((): AnalysisResult => {
     const formResult = formResultRef.current;
@@ -708,12 +815,18 @@ export default function AnalyzePage() {
 
     if (hasCompleteSpeedData) {
       const elapsedSeconds = (ballEndTimeMs - ballStartTimeMs) / 1000;
+      const parsedHeightCm = Number.parseFloat(playerHeightCm);
+      const playerHeightM =
+        Number.isFinite(parsedHeightCm)
+          ? Math.min(2.2, Math.max(1.2, parsedHeightCm / 100))
+          : DEFAULT_PLAYER_HEIGHT_CM / 100;
       finalSpeed = estimateSpeedKmhFromSeconds(
         nosePos,
         anklePos,
         ballStartPos,
         ballEndPos,
-        elapsedSeconds
+        elapsedSeconds,
+        playerHeightM
       );
 
       if (finalSpeed > 0) {
@@ -755,7 +868,7 @@ export default function AnalyzePage() {
       kickType,
       confidence,
     };
-  }, []);
+  }, [playerHeightCm]);
 
   const waitForWorkerFrame = useCallback((runId: number): Promise<boolean> => {
     return new Promise((resolve) => {
@@ -767,7 +880,7 @@ export default function AnalyzePage() {
           return;
         }
 
-        if (!isPoseProcessingRef.current && !isBallProcessingRef.current) {
+        if (pendingPoseRequestIdRef.current === null && pendingBallRequestIdRef.current === null) {
           resolve(true);
           return;
         }
@@ -776,6 +889,8 @@ export default function AnalyzePage() {
           console.warn("Frame analysis timed out");
           isPoseProcessingRef.current = false;
           isBallProcessingRef.current = false;
+          pendingPoseRequestIdRef.current = null;
+          pendingBallRequestIdRef.current = null;
           resolve(false);
           return;
         }
@@ -820,8 +935,9 @@ export default function AnalyzePage() {
       return;
     }
 
-    canvas.width = video.videoWidth || canvas.clientWidth;
-    canvas.height = video.videoHeight || canvas.clientHeight;
+    const analysisFrameSize = getAnalysisFrameSize(video);
+    canvas.width = analysisFrameSize.width || video.videoWidth || canvas.clientWidth;
+    canvas.height = analysisFrameSize.height || video.videoHeight || canvas.clientHeight;
     const frameCaptureCanvas = frameCaptureCanvasRef.current ?? document.createElement("canvas");
     frameCaptureCanvasRef.current = frameCaptureCanvas;
 
@@ -830,10 +946,17 @@ export default function AnalyzePage() {
       setIsAnalyzing(false);
       isPoseProcessingRef.current = false;
       isBallProcessingRef.current = false;
+      pendingPoseRequestIdRef.current = null;
+      pendingBallRequestIdRef.current = null;
 
       const result = buildFinalResult();
       setAnalysisResult(result);
-      persistAnalysis(result);
+      setIsPersistingAnalysis(true);
+      persistAnalysis(result).finally(() => {
+        if (analysisRunIdRef.current === runId) {
+          setIsPersistingAnalysis(false);
+        }
+      });
     };
 
     const processFrames = async () => {
@@ -864,12 +987,18 @@ export default function AnalyzePage() {
           isBallProcessingRef.current = true;
 
           const timestamp = targetTime * 1000;
-          poseFrame = await createWorkerFrame(video, frameCaptureCanvas);
-          ballFrame = await createWorkerFrame(video, frameCaptureCanvas);
+          const frameRequestId = (frameRequestIdRef.current += 1);
+          pendingPoseRequestIdRef.current = frameRequestId;
+          pendingBallRequestIdRef.current = frameRequestId;
+
+          poseFrame = await createWorkerFrame(video, frameCaptureCanvas, canvas.width, canvas.height);
+          ballFrame = await createWorkerFrame(video, frameCaptureCanvas, canvas.width, canvas.height);
 
           if (analysisRunIdRef.current !== runId) {
             closeWorkerFrame(poseFrame);
             closeWorkerFrame(ballFrame);
+            pendingPoseRequestIdRef.current = null;
+            pendingBallRequestIdRef.current = null;
             return;
           }
 
@@ -878,7 +1007,7 @@ export default function AnalyzePage() {
               type: "DETECT",
               imageBitmap: poseFrame,
               timestamp,
-              requestId: runId,
+              requestId: frameRequestId,
             },
             getFrameTransferList(poseFrame)
           );
@@ -889,7 +1018,7 @@ export default function AnalyzePage() {
               type: "DETECT",
               imageBitmap: ballFrame,
               timestamp,
-              requestId: runId,
+              requestId: frameRequestId,
             },
             getFrameTransferList(ballFrame)
           );
@@ -902,6 +1031,8 @@ export default function AnalyzePage() {
           closeWorkerFrame(ballFrame);
           isPoseProcessingRef.current = false;
           isBallProcessingRef.current = false;
+          pendingPoseRequestIdRef.current = null;
+          pendingBallRequestIdRef.current = null;
         }
 
         setAnalysisProgress(Math.round(((frameIndex + 1) / totalFrames) * 100));
@@ -917,6 +1048,8 @@ export default function AnalyzePage() {
       setIsAnalyzing(false);
       isPoseProcessingRef.current = false;
       isBallProcessingRef.current = false;
+      pendingPoseRequestIdRef.current = null;
+      pendingBallRequestIdRef.current = null;
       alert("분석 중 오류가 발생했습니다. 다른 영상으로 다시 시도해 주세요.");
     });
   }, [buildFinalResult, isModelLoading, modelError, persistAnalysis, resetTrackingRefs, waitForWorkerFrame]);
@@ -991,6 +1124,23 @@ export default function AnalyzePage() {
                 Make sure your full body and the ball are visible. We recommend recording at 60fps or higher.
               </p>
 
+              <label className="w-full max-w-md mb-6 flex items-center justify-between gap-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3">
+                <span className="text-sm font-bold text-white">키 보정</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="120"
+                    max="220"
+                    inputMode="decimal"
+                    value={playerHeightCm}
+                    onChange={(e) => setPlayerHeightCm(e.target.value)}
+                    className="w-24 rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-right text-sm font-bold text-white outline-none focus:border-[var(--color-neon-green)]"
+                    aria-label="Player height in centimeters"
+                  />
+                  <span className="text-xs font-mono text-gray-400">cm</span>
+                </div>
+              </label>
+
               {modelError && (
                 <div className="w-full max-w-md mb-6 flex items-start gap-3 rounded-xl border border-yellow-300/30 bg-yellow-300/10 p-4 text-sm text-yellow-100">
                   <AlertTriangle size={18} className="mt-0.5 shrink-0" />
@@ -1041,8 +1191,9 @@ export default function AnalyzePage() {
                 preload="auto"
                 onLoadedMetadata={(e) => {
                   if (canvasRef.current) {
-                    canvasRef.current.width = e.currentTarget.videoWidth;
-                    canvasRef.current.height = e.currentTarget.videoHeight;
+                    const frameSize = getAnalysisFrameSize(e.currentTarget);
+                    canvasRef.current.width = frameSize.width || e.currentTarget.videoWidth;
+                    canvasRef.current.height = frameSize.height || e.currentTarget.videoHeight;
                   }
                 }}
               />
@@ -1131,11 +1282,12 @@ export default function AnalyzePage() {
 
                 <div className="flex justify-center mt-6">
                   <button
-                    onClick={resetVideo}
-                    className="px-8 py-4 rounded-full font-bold bg-gradient-to-r from-white/10 to-white/5 hover:from-[var(--color-neon-green)]/20 hover:to-[var(--color-neon-blue)]/20 border border-white/20 hover:border-white/40 transition-all hover:-translate-y-1 hover:shadow-[0_10px_40px_-10px_rgba(255,255,255,0.2)] flex items-center gap-3"
+                    onClick={reloadForAnotherVideo}
+                    disabled={isPersistingAnalysis}
+                    className="px-8 py-4 rounded-full font-bold bg-gradient-to-r from-white/10 to-white/5 hover:from-[var(--color-neon-green)]/20 hover:to-[var(--color-neon-blue)]/20 border border-white/20 hover:border-white/40 transition-all hover:-translate-y-1 hover:shadow-[0_10px_40px_-10px_rgba(255,255,255,0.2)] flex items-center gap-3 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <ArrowLeft size={20} />
-                    다른 영상 분석하기
+                    {isPersistingAnalysis ? <Loader2 size={20} className="animate-spin" /> : <ArrowLeft size={20} />}
+                    {isPersistingAnalysis ? "결과 저장 중" : "다른 영상 분석하기"}
                   </button>
                 </div>
               </div>

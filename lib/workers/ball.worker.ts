@@ -1,20 +1,15 @@
-import '@tensorflow/tfjs-backend-webgl';
-import * as cocoSsd from '@tensorflow-models/coco-ssd';
-
-let model: cocoSsd.ObjectDetection | null = null;
-let isLoading = false;
 let previousMotionFrame: MotionFrame | null = null;
 let motionCanvas: OffscreenCanvas | null = null;
 let sourceMotionCanvas: OffscreenCanvas | null = null;
 
-const MOTION_ANALYSIS_WIDTH = 360;
-const MOTION_DIFF_THRESHOLD = 28;
+const MOTION_ANALYSIS_WIDTH = 420;
+const MOTION_DIFF_THRESHOLD = 22;
 
 interface BallDetection {
   bbox: number[];
   class: string;
   score: number;
-  source?: "coco" | "motion";
+  source?: "motion";
 }
 
 interface MotionFrame {
@@ -208,21 +203,21 @@ function detectMotionBalls(current: MotionFrameData): BallDetection[] {
     const minSide = Math.min(boxWidth, boxHeight);
 
     if (
-      area < 5 ||
-      area > 1300 ||
+      area < 4 ||
+      area > 1800 ||
       maxSide < 4 ||
-      maxSide > 62 ||
-      minSide < 3 ||
-      aspect < 0.45 ||
-      aspect > 2.2 ||
-      fillRatio < 0.12
+      maxSide > 82 ||
+      minSide < 2 ||
+      aspect < 0.35 ||
+      aspect > 3.2 ||
+      fillRatio < 0.08
     ) {
       continue;
     }
 
     const averageDiff = diffSum / area;
     const roundness = minSide / Math.max(maxSide, 1);
-    const sizePenalty = Math.max(0, (maxSide - 34) / 50);
+    const sizePenalty = Math.max(0, (maxSide - 42) / 60);
     const score = Math.max(0.12, Math.min(0.88, averageDiff / 255 * 0.9 + roundness * 0.25 - sizePenalty));
 
     detections.push({
@@ -247,42 +242,16 @@ self.onmessage = async (e) => {
   const { type } = e.data;
 
   if (type === "INIT") {
-    if (model || isLoading) return;
-    isLoading = true;
-
-    try {
-      model = await cocoSsd.load();
-      self.postMessage({ type: "INIT_SUCCESS" });
-    } catch (error) {
-      self.postMessage({ type: "INIT_ERROR", error: String(error) });
-    } finally {
-      isLoading = false;
-    }
+    self.postMessage({ type: "INIT_SUCCESS" });
   } else if (type === "RESET") {
     previousMotionFrame = null;
   } else if (type === "DETECT") {
     const { imageBitmap, timestamp, requestId } = e.data;
-
-    if (!model) {
-      closeImageSource(imageBitmap);
-      self.postMessage({ type: "DETECT_RESULT", balls: [], timestamp, requestId });
-      return;
-    }
     
     try {
-      const predictions = await model.detect(imageBitmap, 50, 0.18);
-      // 'sports ball' is class ID 32 in COCO, but string is 'sports ball'
-      const cocoPredictions: BallDetection[] = predictions
-        .filter(p => p.class === 'sports ball')
-        .map((prediction) => ({
-          bbox: prediction.bbox,
-          class: prediction.class,
-          score: prediction.score,
-          source: "coco",
-        }));
       const motionFrame = readMotionFrame(imageBitmap);
       const motionPredictions = motionFrame ? detectMotionBalls(motionFrame) : [];
-      const ballPredictions = [...cocoPredictions, ...motionPredictions]
+      const ballPredictions = motionPredictions
         .sort((a, b) => b.score - a.score)
         .slice(0, 10);
       

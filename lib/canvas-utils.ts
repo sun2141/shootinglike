@@ -11,7 +11,7 @@ export function drawLandmarks(
   ctx.lineWidth = lineWidth;
 
   for (const landmark of landmarks) {
-    if (landmark.visibility && landmark.visibility < 0.5) continue;
+    if (landmark.visibility !== undefined && landmark.visibility < 0.5) continue;
     
     const x = landmark.x * ctx.canvas.width;
     const y = landmark.y * ctx.canvas.height;
@@ -40,8 +40,9 @@ export function drawConnectors(
     const start = landmarks[connection.start];
     const end = landmarks[connection.end];
 
-    if (start.visibility && start.visibility < 0.5) continue;
-    if (end.visibility && end.visibility < 0.5) continue;
+    if (!start || !end) continue;
+    if (start.visibility !== undefined && start.visibility < 0.5) continue;
+    if (end.visibility !== undefined && end.visibility < 0.5) continue;
 
     const startX = start.x * ctx.canvas.width;
     const startY = start.y * ctx.canvas.height;
