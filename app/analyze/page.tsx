@@ -36,6 +36,8 @@ const FRAME_WORKER_TIMEOUT_MS = 7000;
 const OPT_IN_STORAGE_KEY = "freekickDataOptIn";
 const PLAYER_HEIGHT_STORAGE_KEY = "freekickPlayerHeightCm";
 const DEFAULT_PLAYER_HEIGHT_CM = 175;
+const DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO = 16 / 9;
+const MOBILE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 
 type FootSide = "left" | "right";
 type Confidence = "high" | "partial" | "failed";
@@ -337,6 +339,8 @@ function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
 
 export default function AnalyzePage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoPreviewAspectRatio, setVideoPreviewAspectRatio] = useState(DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO);
+  const [videoPreviewError, setVideoPreviewError] = useState<string | null>(null);
   const [isPoseLoading, setIsPoseLoading] = useState(true);
   const [isBallLoading, setIsBallLoading] = useState(true);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -433,6 +437,23 @@ export default function AnalyzePage() {
       URL.revokeObjectURL(videoUrlRef.current);
       videoUrlRef.current = null;
     }
+  }, []);
+
+  const syncVideoPreview = useCallback((video: HTMLVideoElement) => {
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+
+    if (width > 0 && height > 0) {
+      setVideoPreviewAspectRatio(width / height);
+    }
+
+    if (canvasRef.current) {
+      const frameSize = getAnalysisFrameSize(video);
+      canvasRef.current.width = frameSize.width || width || canvasRef.current.clientWidth || 1;
+      canvasRef.current.height = frameSize.height || height || canvasRef.current.clientHeight || 1;
+    }
+
+    setVideoPreviewError(null);
   }, []);
 
   const processPoseResult = useCallback((landmarks: NormalizedLandmark[][], timestampMs: number) => {
@@ -681,6 +702,23 @@ export default function AnalyzePage() {
     };
   }, [revokeCurrentVideoUrl]);
 
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!videoUrl || !video) return;
+
+    const frameId = requestAnimationFrame(() => {
+      try {
+        video.load();
+      } catch {
+        // Mobile browsers may reject explicit loads for transient blob URLs.
+      }
+    });
+
+    return () => {
+      cancelAnimationFrame(frameId);
+    };
+  }, [videoUrl]);
+
   const persistAnalysis = useCallback(
     async (result: AnalysisResult) => {
       if (result.estimatedSpeedKmh <= 0 || result.confidence === "failed") return;
@@ -724,7 +762,11 @@ export default function AnalyzePage() {
       e.target.value = "";
       if (!file) return;
 
-      if (!file.type.startsWith("video/")) {
+      const isVideoFile =
+        file.type.startsWith("video/") ||
+        (!file.type && MOBILE_VIDEO_EXTENSION_PATTERN.test(file.name));
+
+      if (!isVideoFile) {
         alert("영상 파일만 업로드할 수 있습니다.");
         return;
       }
@@ -748,6 +790,8 @@ export default function AnalyzePage() {
       setAnalysisResult(null);
       setImpactDetected(false);
       setAnalysisProgress(0);
+      setVideoPreviewAspectRatio(DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO);
+      setVideoPreviewError(null);
       setIsAnalyzing(false);
       setIsPersistingAnalysis(false);
       ballWorkerRef.current?.postMessage({ type: "RESET" });
@@ -766,6 +810,8 @@ export default function AnalyzePage() {
     resetTrackingRefs();
     setVideoFile(null);
     setVideoUrl(null);
+    setVideoPreviewAspectRatio(DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO);
+    setVideoPreviewError(null);
     setAnalysisResult(null);
     setImpactDetected(false);
     setAnalysisProgress(0);
@@ -1180,24 +1226,41 @@ export default function AnalyzePage() {
           </div>
         ) : (
           <div className="w-full flex flex-col items-center gap-8">
-            <div className="relative w-full max-w-3xl bg-black rounded-xl overflow-hidden border border-white/10 shadow-[0_0_30px_rgba(0,0,0,0.5)]">
+            <div
+              className="relative w-full max-w-3xl max-h-[60svh] bg-black rounded-xl overflow-hidden border border-white/10 shadow-[0_0_30px_rgba(0,0,0,0.5)]"
+              style={{ aspectRatio: videoPreviewAspectRatio }}
+            >
               <video
+                key={videoUrl}
                 ref={videoRef}
                 src={videoUrl}
-                className="w-full h-auto max-h-[60vh] object-contain"
-                crossOrigin="anonymous"
+                className="absolute inset-0 h-full w-full object-contain"
+                controls
                 playsInline
                 muted
                 preload="auto"
                 onLoadedMetadata={(e) => {
-                  if (canvasRef.current) {
-                    const frameSize = getAnalysisFrameSize(e.currentTarget);
-                    canvasRef.current.width = frameSize.width || e.currentTarget.videoWidth;
-                    canvasRef.current.height = frameSize.height || e.currentTarget.videoHeight;
-                  }
+                  syncVideoPreview(e.currentTarget);
                 }}
-              />
-              <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full object-contain pointer-events-none" />
+                onLoadedData={(e) => {
+                  syncVideoPreview(e.currentTarget);
+                }}
+                onCanPlay={(e) => {
+                  syncVideoPreview(e.currentTarget);
+                }}
+                onError={() => {
+                  setVideoPreviewError("이 브라우저에서 영상 미리보기를 불러오지 못했습니다.");
+                }}
+              >
+                브라우저가 영상 미리보기를 지원하지 않습니다.
+              </video>
+              <canvas ref={canvasRef} className="absolute inset-0 h-full w-full object-contain pointer-events-none" />
+
+              {videoPreviewError && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/80 px-6 text-center text-sm text-yellow-100">
+                  {videoPreviewError}
+                </div>
+              )}
 
               {isAnalyzing && (
                 <div className="absolute top-4 right-4 bg-black/50 backdrop-blur-md px-4 py-2 rounded-full flex items-center gap-2 border border-white/10 text-sm font-mono text-[var(--color-neon-green)]">
