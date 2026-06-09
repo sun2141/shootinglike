@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Camera,
+  Database,
   ImageIcon,
   Loader2,
   Play,
@@ -1237,15 +1238,24 @@ export default function AnalyzePage() {
 
   return (
     <div className="min-h-screen flex flex-col p-8 relative">
-      <header className="w-full max-w-4xl mx-auto flex items-center justify-between mb-12">
+      <header className="w-full max-w-4xl mx-auto flex flex-col gap-4 mb-12 sm:flex-row sm:items-center sm:justify-between">
         <Link href="/" className="text-gray-400 hover:text-white flex items-center gap-2 transition-colors">
           <ArrowLeft size={20} />
           <span>Back to Home</span>
         </Link>
-        <div className="font-mono text-sm tracking-widest text-[var(--color-neon-green)] flex items-center gap-2">
-          {isModelLoading && <Loader2 size={14} className="animate-spin" />}
-          {modelError && <AlertTriangle size={14} className="text-yellow-300" />}
-          {modelStatusText}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <Link
+            href="/admin/references"
+            className="flex items-center justify-center gap-2 rounded-full border border-[var(--color-neon-green)]/40 px-4 py-2 text-sm font-bold text-[var(--color-neon-green)] transition-colors hover:bg-[var(--color-neon-green)]/10"
+          >
+            <Database size={16} />
+            Reference DB
+          </Link>
+          <div className="font-mono text-sm tracking-widest text-[var(--color-neon-green)] flex items-center justify-center gap-2">
+            {isModelLoading && <Loader2 size={14} className="animate-spin" />}
+            {modelError && <AlertTriangle size={14} className="text-yellow-300" />}
+            {modelStatusText}
+          </div>
         </div>
       </header>
 

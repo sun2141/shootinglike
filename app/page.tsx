@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { Activity, Zap, Target } from 'lucide-react';
+import { Activity, Database, Zap, Target } from 'lucide-react';
 
 export default function Home() {
   return (
@@ -43,6 +43,13 @@ export default function Home() {
             className="px-8 py-4 bg-transparent border border-white/20 text-white font-bold rounded-full hover:bg-white/10 transition-colors duration-300 text-lg"
           >
             Leaderboard
+          </Link>
+          <Link
+            href="/admin/references"
+            className="px-8 py-4 bg-transparent border border-[var(--color-neon-green)]/40 text-[var(--color-neon-green)] font-bold rounded-full hover:bg-[var(--color-neon-green)]/10 transition-colors duration-300 text-lg flex items-center justify-center gap-2"
+          >
+            <Database size={20} />
+            Reference DB
           </Link>
         </div>
 
