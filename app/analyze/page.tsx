@@ -18,6 +18,11 @@ import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import { estimateSpeedKmhFromSeconds } from "@/lib/analysis/speed";
 import { calculateFormScore, type FormResult } from "@/lib/analysis/form";
 import { generateFeedback } from "@/lib/analysis/feedback";
+import {
+  applyReferenceCalibration,
+  estimateReferenceDistanceMeters,
+  type ReferenceCalibrationSummary,
+} from "@/lib/analysis/reference-calibration";
 import { calculateDistance, type Point } from "@/lib/analysis/math";
 import { ShareCard } from "@/components/ShareCard";
 import html2canvas from "html2canvas";
@@ -46,10 +51,22 @@ type WorkerFrame = ImageBitmap | ImageData;
 interface AnalysisResult {
   framesAnalyzed: number;
   estimatedSpeedKmh: number;
+  rawSpeedKmh?: number;
+  estimatedDistanceMeters?: number;
+  ballDisplacementPx?: number;
+  kickerHeightPx?: number;
   formResult: FormResult;
   feedbacks: string[];
   kickType: string;
   confidence: Confidence;
+  referenceCalibration?: {
+    factor: number;
+    sampleCount: number;
+  };
+  referenceDistance?: {
+    metersPerPixel: number;
+    sampleCount: number;
+  };
 }
 
 interface TimedPoint extends Point {
@@ -351,6 +368,7 @@ export default function AnalyzePage() {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [impactDetected, setImpactDetected] = useState(false);
   const [isPersistingAnalysis, setIsPersistingAnalysis] = useState(false);
+  const [referenceCalibration, setReferenceCalibration] = useState<ReferenceCalibrationSummary | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -360,6 +378,7 @@ export default function AnalyzePage() {
   const animationFrameRef = useRef<number | null>(null);
   const videoUrlRef = useRef<string | null>(null);
   const frameCaptureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const referenceCalibrationRef = useRef<ReferenceCalibrationSummary | null>(null);
 
   const [isSharing, setIsSharing] = useState(false);
   const [optIn, setOptIn] = useState(() => {
@@ -719,6 +738,28 @@ export default function AnalyzePage() {
     };
   }, [videoUrl]);
 
+  useEffect(() => {
+    referenceCalibrationRef.current = referenceCalibration;
+  }, [referenceCalibration]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    fetch("/api/reference-calibration", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { calibration?: ReferenceCalibrationSummary } | null) => {
+        if (disposed) return;
+        setReferenceCalibration(data?.calibration ?? null);
+      })
+      .catch(() => {
+        if (!disposed) setReferenceCalibration(null);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
   const persistAnalysis = useCallback(
     async (result: AnalysisResult) => {
       if (result.estimatedSpeedKmh <= 0 || result.confidence === "failed") return;
@@ -735,6 +776,8 @@ export default function AnalyzePage() {
             estimatedSpeedKmh: result.estimatedSpeedKmh,
             formScore: result.formResult.score,
             kickType: result.kickType,
+            ballDisplacementPx: result.ballDisplacementPx,
+            kickerHeightPx: result.kickerHeightPx,
           }),
         });
 
@@ -853,11 +896,17 @@ export default function AnalyzePage() {
       formResult;
 
     let finalSpeed = 0;
+    let rawSpeed = 0;
+    let estimatedDistanceMeters: number | undefined;
+    let ballDisplacementPx: number | undefined;
+    let kickerHeightPx: number | undefined;
     let confidence: Confidence = "failed";
     let finalFormResult: FormResult = formResult ?? { score: 0, kneeAngle: 0, torsoLeanAngle: 0 };
     let feedbacks: string[] = [
       "임팩트를 명확히 찾지 못했습니다. 공과 전신이 잘 보이는 짧은 영상을 다시 업로드해 주세요.",
     ];
+    let appliedReferenceCalibration: AnalysisResult["referenceCalibration"];
+    let appliedReferenceDistance: AnalysisResult["referenceDistance"];
 
     if (hasCompleteSpeedData) {
       const elapsedSeconds = (ballEndTimeMs - ballStartTimeMs) / 1000;
@@ -866,7 +915,9 @@ export default function AnalyzePage() {
         Number.isFinite(parsedHeightCm)
           ? Math.min(2.2, Math.max(1.2, parsedHeightCm / 100))
           : DEFAULT_PLAYER_HEIGHT_CM / 100;
-      finalSpeed = estimateSpeedKmhFromSeconds(
+      ballDisplacementPx = calculateDistance(ballStartPos, ballEndPos);
+      kickerHeightPx = calculateDistance(nosePos, anklePos);
+      rawSpeed = estimateSpeedKmhFromSeconds(
         nosePos,
         anklePos,
         ballStartPos,
@@ -874,11 +925,42 @@ export default function AnalyzePage() {
         elapsedSeconds,
         playerHeightM
       );
+      finalSpeed = applyReferenceCalibration(rawSpeed, referenceCalibrationRef.current);
+      estimatedDistanceMeters = estimateReferenceDistanceMeters(ballDisplacementPx, referenceCalibrationRef.current) ?? undefined;
 
       if (finalSpeed > 0) {
         confidence = "high";
         finalFormResult = formResult;
         feedbacks = generateFeedback(formResult, finalSpeed);
+        const referenceFeedbacks: string[] = [];
+
+        if (referenceCalibrationRef.current?.enabled && referenceCalibrationRef.current.sampleCount > 0) {
+          appliedReferenceCalibration = {
+            factor: referenceCalibrationRef.current.factor,
+            sampleCount: referenceCalibrationRef.current.sampleCount,
+          };
+          referenceFeedbacks.push(
+            `레퍼런스 영상 ${referenceCalibrationRef.current.sampleCount}개 기준으로 구속을 보정했습니다.`
+          );
+        }
+
+        if (
+          estimatedDistanceMeters !== undefined &&
+          referenceCalibrationRef.current?.distanceEnabled &&
+          referenceCalibrationRef.current.metersPerPixel
+        ) {
+          appliedReferenceDistance = {
+            metersPerPixel: referenceCalibrationRef.current.metersPerPixel,
+            sampleCount: referenceCalibrationRef.current.distanceSampleCount,
+          };
+          referenceFeedbacks.push(
+            `레퍼런스 거리 기준으로 공 이동거리를 ${estimatedDistanceMeters.toFixed(1)}m로 추정했습니다.`
+          );
+        }
+
+        if (referenceFeedbacks.length > 0) {
+          feedbacks = [...referenceFeedbacks, ...feedbacks];
+        }
       }
     }
 
@@ -909,10 +991,16 @@ export default function AnalyzePage() {
     return {
       framesAnalyzed: frameCounterRef.current,
       estimatedSpeedKmh: finalSpeed,
+      rawSpeedKmh: rawSpeed || undefined,
+      estimatedDistanceMeters,
+      ballDisplacementPx,
+      kickerHeightPx,
       formResult: finalFormResult,
       feedbacks,
       kickType,
       confidence,
+      referenceCalibration: appliedReferenceCalibration,
+      referenceDistance: appliedReferenceDistance,
     };
   }, [playerHeightCm]);
 
@@ -1301,8 +1389,17 @@ export default function AnalyzePage() {
                     <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.estimatedSpeedKmh}</div>
                     <div className="text-sm text-[var(--color-neon-green)] mt-2 font-mono font-bold tracking-widest">km/h</div>
                     <div className="mt-3 text-[10px] font-mono tracking-widest text-gray-500">
-                      {analysisResult.confidence === "high" ? "TIME-BASED" : "NOT ENOUGH BALL DATA"}
+                      {analysisResult.referenceCalibration
+                        ? `REF x${analysisResult.referenceCalibration.factor.toFixed(3)}`
+                        : analysisResult.confidence === "high"
+                          ? "TIME-BASED"
+                          : "NOT ENOUGH BALL DATA"}
                     </div>
+                    {analysisResult.referenceDistance && analysisResult.estimatedDistanceMeters !== undefined && (
+                      <div className="mt-2 text-[10px] font-mono tracking-widest text-[var(--color-neon-blue)]">
+                        DIST {analysisResult.estimatedDistanceMeters.toFixed(1)} m
+                      </div>
+                    )}
                   </div>
 
                   <div className="glass-card p-6 flex flex-col items-center text-center border-t-4 border-t-[var(--color-neon-blue)] hover:-translate-y-2 transition-transform duration-300 shadow-[0_0_20px_rgba(0,255,255,0.1)] hover:shadow-[0_0_30px_rgba(0,255,255,0.3)]">

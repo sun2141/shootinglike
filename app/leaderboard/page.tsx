@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowLeft, Trophy } from "lucide-react";
 import type { Prisma } from "@prisma/client";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 
 // Server component
 export const dynamic = 'force-dynamic';
@@ -13,6 +13,7 @@ type LeaderboardAnalysis = Prisma.AnalysisGetPayload<{
 export default async function LeaderboardPage() {
   let analyses: LeaderboardAnalysis[] = [];
   try {
+    const prisma = getPrisma();
     analyses = await prisma.analysis.findMany({
       take: 20,
       orderBy: [

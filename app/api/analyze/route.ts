@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { getPrisma } from '@/lib/prisma';
 
 export const runtime = 'nodejs';
 
@@ -16,11 +16,14 @@ function buildAnonymousNickname(deviceId: string): string {
 
 export async function POST(req: Request) {
   try {
+    const prisma = getPrisma();
     const body = await req.json();
-    const { deviceId, nickname, estimatedSpeedKmh, formScore, kickType } = body;
+    const { deviceId, nickname, estimatedSpeedKmh, formScore, kickType, ballDisplacementPx, kickerHeightPx } = body;
     const normalizedDeviceId = normalizeDeviceId(deviceId);
     const speed = Number(estimatedSpeedKmh);
     const score = Number(formScore);
+    const ballDisplacement = Number(ballDisplacementPx);
+    const kickerHeight = Number(kickerHeightPx);
 
     if (!normalizedDeviceId || !Number.isFinite(speed) || !Number.isFinite(score)) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
@@ -53,6 +56,10 @@ export async function POST(req: Request) {
         estimatedSpeedKmh: Math.round(speed),
         formScore: Math.round(score),
         kickType: typeof kickType === 'string' ? kickType.slice(0, 40) : null,
+        ballDisplacementPx:
+          Number.isFinite(ballDisplacement) && ballDisplacement > 0 ? ballDisplacement : null,
+        kickerHeightPx:
+          Number.isFinite(kickerHeight) && kickerHeight > 0 ? kickerHeight : null,
       }
     });
 

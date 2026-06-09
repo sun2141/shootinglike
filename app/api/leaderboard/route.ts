@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { getPrisma } from '@/lib/prisma';
 
 export const runtime = 'nodejs';
 
 export async function GET() {
   try {
+    const prisma = getPrisma();
     const topAnalyses = await prisma.analysis.findMany({
       take: 50,
       orderBy: [
