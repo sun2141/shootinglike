@@ -18,6 +18,8 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
+import { getAnalysisFrameSize } from "@/lib/analysis/frame-size";
+import { calculateDistance, type Point } from "@/lib/analysis/math";
 
 interface ReferenceRecord {
   id: string;
@@ -134,6 +136,8 @@ interface BatchSampleState {
   timingEndSeconds: string;
   notes: string;
 }
+
+type MeasureMode = "none" | "height" | "ball";
 
 const EMPTY_FORM: FormState = {
   label: "",
@@ -299,6 +303,7 @@ function getMetersPerPixel(distanceMeters: string, ballDisplacementPx: string) {
 
 export default function ReferenceAdminPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const analysisRequestRef = useRef(0);
   const lastAnalyzedSourceUrlRef = useRef("");
   const nextBatchSampleIdRef = useRef(DEFAULT_BATCH_SAMPLE_COUNT);
@@ -325,6 +330,9 @@ export default function ReferenceAdminPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isBatchSaving, setIsBatchSaving] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [measureMode, setMeasureMode] = useState<MeasureMode>("none");
+  const [heightPoints, setHeightPoints] = useState<Point[]>([]);
+  const [ballPoints, setBallPoints] = useState<Point[]>([]);
   const [linkAnalysis, setLinkAnalysis] = useState<LinkAnalysisDraft | null>(null);
   const [linkAnalysisError, setLinkAnalysisError] = useState<string | null>(null);
   const [isAnalyzingLink, setIsAnalyzingLink] = useState(false);
@@ -428,6 +436,117 @@ export default function ReferenceAdminPage() {
     };
   }, [videoUrl]);
 
+  const syncOverlayCanvasSize = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = overlayCanvasRef.current;
+    if (!video || !canvas) return false;
+
+    const frameSize = getAnalysisFrameSize(video);
+    const elementWidth = video.clientWidth;
+    const elementHeight = video.clientHeight;
+
+    if (frameSize.width <= 0 || frameSize.height <= 0 || elementWidth <= 0 || elementHeight <= 0) {
+      return false;
+    }
+
+    if (canvas.width !== frameSize.width) canvas.width = frameSize.width;
+    if (canvas.height !== frameSize.height) canvas.height = frameSize.height;
+
+    const sourceAspect = frameSize.width / frameSize.height;
+    const elementAspect = elementWidth / elementHeight;
+    let contentWidth = elementWidth;
+    let contentHeight = elementHeight;
+    let contentLeft = 0;
+    let contentTop = 0;
+
+    if (elementAspect > sourceAspect) {
+      contentWidth = elementHeight * sourceAspect;
+      contentLeft = (elementWidth - contentWidth) / 2;
+    } else if (elementAspect < sourceAspect) {
+      contentHeight = elementWidth / sourceAspect;
+      contentTop = (elementHeight - contentHeight) / 2;
+    }
+
+    canvas.style.left = `${contentLeft}px`;
+    canvas.style.top = `${contentTop}px`;
+    canvas.style.width = `${contentWidth}px`;
+    canvas.style.height = `${contentHeight}px`;
+    return true;
+  }, []);
+
+  const drawMeasurementOverlay = useCallback(() => {
+    const canvas = overlayCanvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx || !syncOverlayCanvasSize()) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const drawPoints = (points: Point[], color: string, labels: [string, string]) => {
+      if (points.length === 0) return;
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = Math.max(2, canvas.width / 480);
+      ctx.font = `${Math.max(12, Math.round(canvas.width / 70))}px ui-monospace, monospace`;
+      ctx.textBaseline = "bottom";
+
+      if (points.length === 2) {
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        ctx.lineTo(points[1].x, points[1].y);
+        ctx.stroke();
+
+        const distance = calculateDistance(points[0], points[1]);
+        const midX = (points[0].x + points[1].x) / 2;
+        const midY = (points[0].y + points[1].y) / 2;
+        ctx.fillText(`${distance.toFixed(1)} px`, Math.min(midX + 10, canvas.width - 120), Math.max(18, midY - 8));
+      }
+
+      points.forEach((point, index) => {
+        const radius = Math.max(5, canvas.width / 160);
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, radius, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(point.x - radius * 1.7, point.y);
+        ctx.lineTo(point.x + radius * 1.7, point.y);
+        ctx.moveTo(point.x, point.y - radius * 1.7);
+        ctx.lineTo(point.x, point.y + radius * 1.7);
+        ctx.stroke();
+
+        const labelX = Math.min(point.x + radius + 8, canvas.width - 150);
+        const labelY = Math.max(18, point.y - radius - 4);
+        ctx.fillText(labels[index] ?? `P${index + 1}`, labelX, labelY);
+      });
+
+      ctx.restore();
+    };
+
+    drawPoints(heightPoints, "#39FF14", ["HEAD", "ANKLE"]);
+    drawPoints(ballPoints, "#04d9ff", ["BALL START", "BALL END"]);
+  }, [ballPoints, heightPoints, syncOverlayCanvasSize]);
+
+  useEffect(() => {
+    drawMeasurementOverlay();
+  }, [drawMeasurementOverlay, playableVideoUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !playableVideoUrl) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      drawMeasurementOverlay();
+    });
+    resizeObserver.observe(video);
+    window.addEventListener("resize", drawMeasurementOverlay);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", drawMeasurementOverlay);
+    };
+  }, [drawMeasurementOverlay, playableVideoUrl]);
+
   const updateForm = <K extends keyof FormState>(field: K, value: FormState[K]) => {
     setForm((current) => ({
       ...current,
@@ -481,6 +600,91 @@ export default function ReferenceAdminPage() {
     }));
     setMessage(`${yards} yards 거리 기준을 적용했습니다.`);
     setError(null);
+  };
+
+  const startMeasurementMode = (mode: Exclude<MeasureMode, "none">) => {
+    if (!playableVideoUrl) {
+      setError("정확한 픽셀 측정은 로컬 영상 미리보기나 직접 재생 가능한 영상 URL에서만 가능합니다.");
+      return;
+    }
+
+    setError(null);
+    drawMeasurementOverlay();
+
+    if (measureMode === mode) {
+      setMeasureMode("none");
+      return;
+    }
+
+    if (mode === "height") {
+      if (heightPoints.length >= 2) setHeightPoints([]);
+      setMeasureMode("height");
+      setMessage("머리 위치를 클릭한 뒤 디딤발 발목 위치를 클릭하세요.");
+      return;
+    }
+
+    if (ballPoints.length >= 2) setBallPoints([]);
+    setMeasureMode("ball");
+    setMessage(
+      ballPoints.length === 0
+        ? "임팩트 프레임에서 공 위치를 클릭하세요."
+        : "끝 프레임으로 이동한 뒤 공 위치를 클릭하세요."
+    );
+  };
+
+  const clearMeasurementMarks = () => {
+    setMeasureMode("none");
+    setHeightPoints([]);
+    setBallPoints([]);
+  };
+
+  const handleMeasurementCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (measureMode === "none") return;
+
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const point: Point = {
+      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+    };
+
+    if (point.x < 0 || point.y < 0 || point.x > canvas.width || point.y > canvas.height) {
+      setError("영상 영역 안쪽을 클릭해 주세요.");
+      return;
+    }
+
+    if (measureMode === "height") {
+      const nextPoints = heightPoints.length >= 2 ? [point] : [...heightPoints, point];
+      setHeightPoints(nextPoints);
+
+      if (nextPoints.length === 2) {
+        const distance = calculateDistance(nextPoints[0], nextPoints[1]);
+        updateForm("bodyHeightPx", distance.toFixed(1));
+        setMeasureMode("none");
+        setMessage(`신체 높이 ${distance.toFixed(1)} px를 입력했습니다.`);
+      } else {
+        setMessage("디딤발 발목 위치를 클릭하세요.");
+      }
+      return;
+    }
+
+    const nextPoints = ballPoints.length >= 2 ? [point] : [...ballPoints, point];
+    setBallPoints(nextPoints);
+
+    if (nextPoints.length === 1) {
+      setMeasureMode("none");
+      setMessage("공 시작점을 저장했습니다. 끝 프레임으로 이동한 뒤 Ball Travel을 다시 눌러 끝점을 찍으세요.");
+      return;
+    }
+
+    const distance = calculateDistance(nextPoints[0], nextPoints[1]);
+    updateForm("ballDisplacementPx", distance.toFixed(1));
+    setMeasureMode("none");
+    setMessage(`공 이동량 ${distance.toFixed(1)} px를 입력했습니다.`);
   };
 
   const copyCurrentFormToBatch = () => {
@@ -639,6 +843,9 @@ export default function ReferenceAdminPage() {
     }));
     setMessage(null);
     setError(null);
+    setMeasureMode("none");
+    setHeightPoints([]);
+    setBallPoints([]);
   };
 
   const updateSourceUrl = (value: string) => {
@@ -654,6 +861,9 @@ export default function ReferenceAdminPage() {
     setLinkAnalysis(null);
     setLinkAnalysisError(null);
     setIsVideoPlaying(false);
+    setMeasureMode("none");
+    setHeightPoints([]);
+    setBallPoints([]);
   };
 
   const captureTime = (field: "timingStartSeconds" | "timingEndSeconds") => {
@@ -673,6 +883,7 @@ export default function ReferenceAdminPage() {
           ? video.duration.toFixed(3)
           : current.durationSeconds,
     }));
+    window.requestAnimationFrame(drawMeasurementOverlay);
   };
 
   const togglePlayback = async () => {
@@ -693,6 +904,9 @@ export default function ReferenceAdminPage() {
     setVideoUrl(null);
     setForm(EMPTY_FORM);
     resetBatchSamples();
+    setMeasureMode("none");
+    setHeightPoints([]);
+    setBallPoints([]);
     setLinkAnalysis(null);
     setLinkAnalysisError(null);
     lastAnalyzedSourceUrlRef.current = "";
@@ -1009,27 +1223,47 @@ export default function ReferenceAdminPage() {
 
             <div className="grid grid-cols-1 gap-0 lg:grid-cols-[minmax(0,1fr)_300px]">
               <div className="border-b border-white/10 p-5 lg:border-b-0 lg:border-r">
-                <label className="mb-4 flex min-h-64 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-xl border border-dashed border-white/20 bg-black/30 transition-colors hover:border-[var(--color-neon-green)]/60">
+                <div className="mb-4 flex min-h-64 flex-col items-center justify-center overflow-hidden rounded-xl border border-dashed border-white/20 bg-black/30">
                   {playableVideoUrl ? (
-                    <video
-                      ref={videoRef}
-                      src={playableVideoUrl}
-                      className="h-full max-h-[48vh] w-full object-contain"
-                      controls
-                      muted
-                      playsInline
-                      onLoadedMetadata={handleVideoMetadata}
-                      onPlay={() => setIsVideoPlaying(true)}
-                      onPause={() => setIsVideoPlaying(false)}
-                    />
+                    <div className="relative flex w-full items-center justify-center">
+                      <video
+                        ref={videoRef}
+                        src={playableVideoUrl}
+                        className="block max-h-[48vh] w-full object-contain"
+                        controls
+                        muted
+                        playsInline
+                        onLoadedMetadata={handleVideoMetadata}
+                        onLoadedData={() => drawMeasurementOverlay()}
+                        onCanPlay={() => drawMeasurementOverlay()}
+                        onPlay={() => setIsVideoPlaying(true)}
+                        onPause={() => setIsVideoPlaying(false)}
+                      />
+                      <canvas
+                        ref={overlayCanvasRef}
+                        onClick={handleMeasurementCanvasClick}
+                        className={`absolute z-10 ${
+                          measureMode !== "none" ? "pointer-events-auto cursor-crosshair" : "pointer-events-none"
+                        }`}
+                        aria-label="Measurement overlay"
+                      />
+                    </div>
                   ) : (
-                    <div className="flex flex-col items-center gap-3 text-gray-400">
+                    <label className="flex min-h-64 w-full cursor-pointer flex-col items-center justify-center gap-3 text-gray-400 transition-colors hover:text-white">
                       <Upload size={34} className="text-[var(--color-neon-green)]" />
                       <span className="text-sm font-bold text-white">Load local preview</span>
-                    </div>
+                      <input type="file" accept="video/*" className="hidden" onChange={handleVideoChange} />
+                    </label>
                   )}
-                  <input type="file" accept="video/*" className="hidden" onChange={handleVideoChange} />
-                </label>
+                </div>
+
+                {playableVideoUrl && (
+                  <label className="mb-4 flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-white/15 px-4 py-3 text-sm font-bold text-gray-300 transition-colors hover:bg-white/10 hover:text-white">
+                    <Upload size={16} />
+                    Load different local preview
+                    <input type="file" accept="video/*" className="hidden" onChange={handleVideoChange} />
+                  </label>
+                )}
 
                 {youtubeVideoId && (
                   <div className="mb-4 overflow-hidden rounded-xl border border-white/10 bg-black/30">
@@ -1076,6 +1310,76 @@ export default function ReferenceAdminPage() {
                   >
                     Reset
                   </button>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-mono text-[10px] tracking-widest text-gray-500">PIXEL CAPTURE</div>
+                      <div className="mt-1 text-sm font-bold text-white">Analysis-scale measurement</div>
+                    </div>
+                    <span
+                      className={`rounded-full border px-3 py-1 font-mono text-[10px] tracking-widest ${
+                        playableVideoUrl
+                          ? "border-[var(--color-neon-green)]/40 text-[var(--color-neon-green)]"
+                          : "border-white/15 text-gray-500"
+                      }`}
+                    >
+                      {playableVideoUrl ? "READY" : "LOCAL VIDEO NEEDED"}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => startMeasurementMode("height")}
+                      disabled={!playableVideoUrl}
+                      className={`rounded-lg border px-3 py-2 text-sm font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                        measureMode === "height"
+                          ? "border-[var(--color-neon-green)] bg-[var(--color-neon-green)] text-black"
+                          : "border-white/15 hover:bg-white/10"
+                      }`}
+                    >
+                      Body Height
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => startMeasurementMode("ball")}
+                      disabled={!playableVideoUrl}
+                      className={`rounded-lg border px-3 py-2 text-sm font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                        measureMode === "ball"
+                          ? "border-[var(--color-neon-blue)] bg-[var(--color-neon-blue)] text-black"
+                          : "border-white/15 hover:bg-white/10"
+                      }`}
+                    >
+                      Ball Travel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearMeasurementMarks}
+                      disabled={heightPoints.length === 0 && ballPoints.length === 0}
+                      className="rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-400">
+                    <div className="rounded-lg bg-black/20 p-3">
+                      <div className="mb-1 font-mono text-[10px] tracking-widest text-gray-500">BODY PX</div>
+                      {form.bodyHeightPx || "-"}
+                    </div>
+                    <div className="rounded-lg bg-black/20 p-3">
+                      <div className="mb-1 font-mono text-[10px] tracking-widest text-gray-500">BALL PX</div>
+                      {form.ballDisplacementPx || "-"}
+                    </div>
+                  </div>
+
+                  {youtubeVideoId && !playableVideoUrl && (
+                    <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100/80">
+                      YouTube iframe은 정확한 픽셀 좌표계를 보장하지 않습니다. 같은 원본 영상을 로컬 미리보기로 올린 뒤 측정하세요.
+                    </div>
+                  )}
                 </div>
               </div>
 

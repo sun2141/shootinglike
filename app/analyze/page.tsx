@@ -24,12 +24,12 @@ import {
   estimateReferenceDistanceMeters,
   type ReferenceCalibrationSummary,
 } from "@/lib/analysis/reference-calibration";
+import { getAnalysisFrameSize } from "@/lib/analysis/frame-size";
 import { calculateDistance, type Point } from "@/lib/analysis/math";
 import { ShareCard } from "@/components/ShareCard";
 import html2canvas from "html2canvas";
 
 const MAX_CLIENT_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
-const MAX_ANALYSIS_DIMENSION_PX = 960;
 const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 300;
 const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 220;
 const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 360;
@@ -316,20 +316,6 @@ async function createWorkerFrame(
   }
 
   return ctx.getImageData(0, 0, width, height);
-}
-
-function getAnalysisFrameSize(video: HTMLVideoElement) {
-  const sourceWidth = video.videoWidth || video.clientWidth;
-  const sourceHeight = video.videoHeight || video.clientHeight;
-  if (sourceWidth <= 0 || sourceHeight <= 0) {
-    return { width: 0, height: 0 };
-  }
-
-  const scale = Math.min(1, MAX_ANALYSIS_DIMENSION_PX / Math.max(sourceWidth, sourceHeight));
-  return {
-    width: Math.max(1, Math.round(sourceWidth * scale)),
-    height: Math.max(1, Math.round(sourceHeight * scale)),
-  };
 }
 
 function closeWorkerFrame(frame: WorkerFrame | null) {
