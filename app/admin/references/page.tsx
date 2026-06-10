@@ -70,6 +70,37 @@ interface ReferencesResponse {
   error?: string;
 }
 
+interface LinkAnalysisQuestion {
+  field: string;
+  label: string;
+  prompt: string;
+  required: boolean;
+}
+
+interface LinkAnalysisDraft {
+  sourceUrl: string;
+  platform: string;
+  providerName: string;
+  title: string | null;
+  authorName: string | null;
+  thumbnailUrl: string | null;
+  embedUrl: string | null;
+  sourceFilename: string | null;
+  sourceMimeType: string | null;
+  sourceSizeBytes: number | null;
+  durationSeconds: number | null;
+  suggestedLabel: string;
+  suggestedNotes: string;
+  suggestedTags: string[];
+  questions: LinkAnalysisQuestion[];
+  warnings: string[];
+}
+
+interface LinkAnalysisResponse {
+  analysis?: LinkAnalysisDraft;
+  error?: string;
+}
+
 interface FormState {
   label: string;
   knownSpeedKmh: string;
@@ -126,6 +157,19 @@ function formatFileSize(bytes: number | null) {
   if (!bytes) return "-";
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatSeconds(seconds: number | null | undefined) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return "-";
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${minutes}:${remainingSeconds}`;
+}
+
+function getBackgroundImage(url: string) {
+  return `url("${url.replace(/"/g, '\\"')}")`;
 }
 
 function parseFormNumber(value: string) {
@@ -208,6 +252,8 @@ function getMetersPerPixel(distanceMeters: string, ballDisplacementPx: string) {
 
 export default function ReferenceAdminPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const analysisRequestRef = useRef(0);
+  const lastAnalyzedSourceUrlRef = useRef("");
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [adminToken, setAdminToken] = useState(() => {
@@ -226,6 +272,9 @@ export default function ReferenceAdminPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [linkAnalysis, setLinkAnalysis] = useState<LinkAnalysisDraft | null>(null);
+  const [linkAnalysisError, setLinkAnalysisError] = useState<string | null>(null);
+  const [isAnalyzingLink, setIsAnalyzingLink] = useState(false);
 
   const youtubeVideoId = useMemo(() => getYoutubeVideoId(form.sourceUrl), [form.sourceUrl]);
   const remoteVideoUrl = useMemo(() => {
@@ -233,6 +282,8 @@ export default function ReferenceAdminPage() {
     if (!url || youtubeVideoId || !isHttpUrl(url) || !REMOTE_VIDEO_EXTENSION_PATTERN.test(url)) return null;
     return url;
   }, [form.sourceUrl, youtubeVideoId]);
+
+  const canAnalyzeSourceUrl = useMemo(() => isHttpUrl(form.sourceUrl), [form.sourceUrl]);
 
   const timingSpeedKmh = useMemo(
     () => getTimingSpeedKmh(form.knownDistanceMeters, form.timingStartSeconds, form.timingEndSeconds),
@@ -318,6 +369,100 @@ export default function ReferenceAdminPage() {
     }));
   };
 
+  const applyLinkAnalysisDraft = useCallback(
+    (analysis: LinkAnalysisDraft, options: { notify?: boolean } = {}) => {
+      setForm((current) => ({
+        ...current,
+        label: current.label || analysis.suggestedLabel,
+        sourceFilename: current.sourceFilename || analysis.sourceFilename || current.sourceFilename,
+        sourceMimeType: current.sourceMimeType || analysis.sourceMimeType || current.sourceMimeType,
+        sourceSizeBytes: current.sourceSizeBytes ?? analysis.sourceSizeBytes,
+        durationSeconds:
+          current.durationSeconds ||
+          (analysis.durationSeconds ? analysis.durationSeconds.toFixed(3) : current.durationSeconds),
+        notes: current.notes || analysis.suggestedNotes || current.notes,
+      }));
+
+      if (options.notify) {
+        setMessage("링크 분석 초안을 폼에 반영했습니다.");
+      }
+    },
+    []
+  );
+
+  const analyzeSourceUrl = useCallback(
+    async (sourceUrl: string, options: { force?: boolean; notify?: boolean } = {}) => {
+      const trimmedUrl = sourceUrl.trim();
+
+      if (!isHttpUrl(trimmedUrl)) {
+        if (options.force) setLinkAnalysisError("분석할 수 있는 http 또는 https 링크를 입력해 주세요.");
+        return;
+      }
+
+      if (!options.force && lastAnalyzedSourceUrlRef.current === trimmedUrl) return;
+
+      const requestId = analysisRequestRef.current + 1;
+      analysisRequestRef.current = requestId;
+      lastAnalyzedSourceUrlRef.current = trimmedUrl;
+      setIsAnalyzingLink(true);
+      setLinkAnalysisError(null);
+
+      try {
+        const res = await fetch("/api/admin/references/analyze-link", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(adminToken ? { "x-admin-token": adminToken } : {}),
+          },
+          body: JSON.stringify({ sourceUrl: trimmedUrl }),
+        });
+        const data = (await res.json()) as LinkAnalysisResponse;
+
+        if (requestId !== analysisRequestRef.current) return;
+
+        if (!res.ok || !data.analysis) {
+          lastAnalyzedSourceUrlRef.current = "";
+          setLinkAnalysis(null);
+          setLinkAnalysisError(data.error ?? "링크를 분석하지 못했습니다.");
+          return;
+        }
+
+        setLinkAnalysis(data.analysis);
+        applyLinkAnalysisDraft(data.analysis, { notify: options.notify });
+        if (!options.notify) setMessage(null);
+      } catch {
+        if (requestId !== analysisRequestRef.current) return;
+        lastAnalyzedSourceUrlRef.current = "";
+        setLinkAnalysis(null);
+        setLinkAnalysisError("링크를 분석하지 못했습니다.");
+      } finally {
+        if (requestId === analysisRequestRef.current) {
+          setIsAnalyzingLink(false);
+        }
+      }
+    },
+    [adminToken, applyLinkAnalysisDraft]
+  );
+
+  useEffect(() => {
+    const sourceUrl = form.sourceUrl.trim();
+
+    if (!sourceUrl) {
+      lastAnalyzedSourceUrlRef.current = "";
+      return;
+    }
+
+    if (!isHttpUrl(sourceUrl)) return;
+
+    const timeoutId = window.setTimeout(() => {
+      void analyzeSourceUrl(sourceUrl);
+    }, 650);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [analyzeSourceUrl, form.sourceUrl]);
+
   const handleVideoChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -357,6 +502,8 @@ export default function ReferenceAdminPage() {
       ...current,
       sourceUrl: value,
     }));
+    setLinkAnalysis(null);
+    setLinkAnalysisError(null);
     setIsVideoPlaying(false);
   };
 
@@ -396,6 +543,9 @@ export default function ReferenceAdminPage() {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideoUrl(null);
     setForm(EMPTY_FORM);
+    setLinkAnalysis(null);
+    setLinkAnalysisError(null);
+    lastAnalyzedSourceUrlRef.current = "";
     setMessage(null);
     setError(null);
     setIsVideoPlaying(false);
@@ -663,18 +813,130 @@ export default function ReferenceAdminPage() {
                   />
                 </label>
 
-                <label className="flex flex-col gap-2">
+                <div className="flex flex-col gap-2">
                   <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-gray-500">
                     <Link2 size={13} />
                     Source URL
                   </span>
-                  <input
-                    inputMode="url"
-                    value={form.sourceUrl}
-                    onChange={(event) => updateSourceUrl(event.target.value)}
-                    className="rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-sm outline-none focus:border-[var(--color-neon-green)]"
-                  />
-                </label>
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                    <input
+                      inputMode="url"
+                      value={form.sourceUrl}
+                      onChange={(event) => updateSourceUrl(event.target.value)}
+                      className="min-w-0 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-sm outline-none focus:border-[var(--color-neon-green)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => analyzeSourceUrl(form.sourceUrl, { force: true, notify: true })}
+                      disabled={!canAnalyzeSourceUrl || isAnalyzingLink}
+                      className="flex items-center justify-center gap-2 rounded-xl border border-white/20 px-4 py-3 text-sm font-bold transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {isAnalyzingLink ? <Loader2 className="animate-spin" size={16} /> : <Activity size={16} />}
+                      Analyze
+                    </button>
+                  </div>
+                </div>
+
+                {(linkAnalysis || isAnalyzingLink || linkAnalysisError) && (
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="font-mono text-[10px] tracking-widest text-gray-500">LINK ANALYSIS</div>
+                        <div className="mt-1 text-sm font-bold text-white">
+                          {linkAnalysis?.providerName ?? "Analyzing source"}
+                        </div>
+                      </div>
+                      {isAnalyzingLink && <Loader2 className="animate-spin text-[var(--color-neon-green)]" size={18} />}
+                    </div>
+
+                    {linkAnalysis?.thumbnailUrl && (
+                      <div
+                        className="mb-3 aspect-video rounded-lg border border-white/10 bg-cover bg-center"
+                        style={{ backgroundImage: getBackgroundImage(linkAnalysis.thumbnailUrl) }}
+                        aria-label="Reference thumbnail"
+                      />
+                    )}
+
+                    {linkAnalysis && (
+                      <div className="space-y-3">
+                        <div>
+                          <div className="line-clamp-2 text-sm font-bold text-white">
+                            {linkAnalysis.title ?? linkAnalysis.suggestedLabel}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {[linkAnalysis.authorName, linkAnalysis.platform, formatSeconds(linkAnalysis.durationSeconds)]
+                              .filter((item) => item && item !== "-")
+                              .join(" · ")}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          {linkAnalysis.suggestedTags.map((tag) => (
+                            <span
+                              key={tag}
+                              className="rounded-full border border-white/10 bg-black/20 px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-gray-400"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
+                          <div className="rounded-lg bg-black/20 p-3">
+                            <div className="mb-1 font-mono text-[10px] tracking-widest text-gray-500">TYPE</div>
+                            {linkAnalysis.sourceMimeType ?? "-"}
+                          </div>
+                          <div className="rounded-lg bg-black/20 p-3">
+                            <div className="mb-1 font-mono text-[10px] tracking-widest text-gray-500">SIZE</div>
+                            {formatFileSize(linkAnalysis.sourceSizeBytes)}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {linkAnalysis.questions.map((question) => (
+                            <div key={question.field} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-bold text-white">{question.label}</span>
+                                <span
+                                  className={`font-mono text-[10px] tracking-widest ${
+                                    question.required
+                                      ? "text-[var(--color-neon-green)]"
+                                      : "text-gray-500"
+                                  }`}
+                                >
+                                  {question.required ? "REQUIRED" : "CHECK"}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-xs leading-relaxed text-gray-500">{question.prompt}</p>
+                            </div>
+                          ))}
+                        </div>
+
+                        {linkAnalysis.warnings.length > 0 && (
+                          <div className="space-y-1 text-xs leading-relaxed text-amber-100/80">
+                            {linkAnalysis.warnings.map((warning) => (
+                              <div key={warning}>- {warning}</div>
+                            ))}
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => applyLinkAnalysisDraft(linkAnalysis, { notify: true })}
+                          className="w-full rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10"
+                        >
+                          Apply Draft
+                        </button>
+                      </div>
+                    )}
+
+                    {linkAnalysisError && (
+                      <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">
+                        {linkAnalysisError}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <label className="flex flex-col gap-2">
