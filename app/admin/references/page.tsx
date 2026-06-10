@@ -6,12 +6,14 @@ import {
   Activity,
   ArrowLeft,
   CheckCircle2,
+  Copy,
   Database,
   ExternalLink,
   Link2,
   Loader2,
   PauseCircle,
   PlayCircle,
+  Plus,
   Shield,
   Trash2,
   Upload,
@@ -123,6 +125,16 @@ interface FormState {
   sourceUrl: string;
 }
 
+interface BatchSampleState {
+  id: string;
+  labelSuffix: string;
+  knownSpeedKmh: string;
+  measuredSpeedKmh: string;
+  timingStartSeconds: string;
+  timingEndSeconds: string;
+  notes: string;
+}
+
 const EMPTY_FORM: FormState = {
   label: "",
   knownSpeedKmh: "",
@@ -145,8 +157,22 @@ const EMPTY_FORM: FormState = {
   sourceUrl: "",
 };
 
+const TWELVE_YARDS_METERS = 10.9728;
+const DEFAULT_BATCH_SAMPLE_COUNT = 5;
 const REFERENCE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 const REMOTE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm)(\?.*)?$/i;
+
+function createBatchSample(index: number, id = `batch-${index}`): BatchSampleState {
+  return {
+    id,
+    labelSuffix: `Clip ${index + 1}`,
+    knownSpeedKmh: "",
+    measuredSpeedKmh: "",
+    timingStartSeconds: "",
+    timingEndSeconds: "",
+    notes: "",
+  };
+}
 
 function formatNumber(value: number | null | undefined, digits = 1) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
@@ -254,7 +280,11 @@ export default function ReferenceAdminPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const analysisRequestRef = useRef(0);
   const lastAnalyzedSourceUrlRef = useRef("");
+  const nextBatchSampleIdRef = useRef(DEFAULT_BATCH_SAMPLE_COUNT);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [batchSamples, setBatchSamples] = useState<BatchSampleState[]>(() =>
+    Array.from({ length: DEFAULT_BATCH_SAMPLE_COUNT }, (_, index) => createBatchSample(index))
+  );
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [adminToken, setAdminToken] = useState(() => {
     if (typeof window === "undefined") return "";
@@ -271,6 +301,7 @@ export default function ReferenceAdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isBatchSaving, setIsBatchSaving] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [linkAnalysis, setLinkAnalysis] = useState<LinkAnalysisDraft | null>(null);
   const [linkAnalysisError, setLinkAnalysisError] = useState<string | null>(null);
@@ -284,6 +315,19 @@ export default function ReferenceAdminPage() {
   }, [form.sourceUrl, youtubeVideoId]);
 
   const canAnalyzeSourceUrl = useMemo(() => isHttpUrl(form.sourceUrl), [form.sourceUrl]);
+  const filledBatchSampleCount = useMemo(
+    () =>
+      batchSamples.filter((sample) =>
+        [
+          sample.knownSpeedKmh,
+          sample.measuredSpeedKmh,
+          sample.timingStartSeconds,
+          sample.timingEndSeconds,
+          sample.notes,
+        ].some((value) => value.trim().length > 0)
+      ).length,
+    [batchSamples]
+  );
 
   const timingSpeedKmh = useMemo(
     () => getTimingSpeedKmh(form.knownDistanceMeters, form.timingStartSeconds, form.timingEndSeconds),
@@ -367,6 +411,80 @@ export default function ReferenceAdminPage() {
       ...current,
       [field]: value,
     }));
+  };
+
+  const updateBatchSample = <K extends keyof BatchSampleState>(
+    id: string,
+    field: K,
+    value: BatchSampleState[K]
+  ) => {
+    setBatchSamples((current) =>
+      current.map((sample) => (sample.id === id ? { ...sample, [field]: value } : sample))
+    );
+  };
+
+  const addBatchSample = () => {
+    setBatchSamples((current) => {
+      const nextIndex = nextBatchSampleIdRef.current;
+      nextBatchSampleIdRef.current += 1;
+      return [...current, createBatchSample(current.length, `batch-${nextIndex}`)];
+    });
+  };
+
+  const removeBatchSample = (id: string) => {
+    setBatchSamples((current) =>
+      current.length > 1 ? current.filter((sample) => sample.id !== id) : current
+    );
+  };
+
+  const resetBatchSamples = () => {
+    nextBatchSampleIdRef.current = DEFAULT_BATCH_SAMPLE_COUNT;
+    setBatchSamples(Array.from({ length: DEFAULT_BATCH_SAMPLE_COUNT }, (_, index) => createBatchSample(index)));
+  };
+
+  const applyTwelveYardPreset = () => {
+    setForm((current) => ({
+      ...current,
+      knownDistanceMeters: TWELVE_YARDS_METERS.toFixed(4),
+      notes: current.notes || "거리 기준: 12 yards (10.9728 m)",
+    }));
+    setMessage("12 yards 거리 기준을 적용했습니다.");
+    setError(null);
+  };
+
+  const copyCurrentFormToBatch = () => {
+    const nextSample = (index: number, id: string): BatchSampleState => ({
+      id,
+      labelSuffix: `Clip ${index + 1}`,
+      knownSpeedKmh: form.knownSpeedKmh,
+      measuredSpeedKmh: form.measuredSpeedKmh,
+      timingStartSeconds: form.timingStartSeconds,
+      timingEndSeconds: form.timingEndSeconds,
+      notes: "",
+    });
+
+    setBatchSamples((current) => {
+      const emptyIndex = current.findIndex(
+        (sample) =>
+          !sample.knownSpeedKmh.trim() &&
+          !sample.measuredSpeedKmh.trim() &&
+          !sample.timingStartSeconds.trim() &&
+          !sample.timingEndSeconds.trim()
+      );
+
+      if (emptyIndex >= 0) {
+        return current.map((sample, index) =>
+          index === emptyIndex ? nextSample(index, sample.id) : sample
+        );
+      }
+
+      const nextIndex = nextBatchSampleIdRef.current;
+      nextBatchSampleIdRef.current += 1;
+      return [...current, nextSample(current.length, `batch-${nextIndex}`)];
+    });
+
+    setMessage("현재 입력값을 배치 샘플에 복사했습니다.");
+    setError(null);
   };
 
   const applyLinkAnalysisDraft = useCallback(
@@ -543,6 +661,7 @@ export default function ReferenceAdminPage() {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideoUrl(null);
     setForm(EMPTY_FORM);
+    resetBatchSamples();
     setLinkAnalysis(null);
     setLinkAnalysisError(null);
     lastAnalyzedSourceUrlRef.current = "";
@@ -608,6 +727,150 @@ export default function ReferenceAdminPage() {
       setError("레퍼런스를 저장하지 못했습니다.");
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const saveBatchSamples = async () => {
+    const distanceMeters = parseFormNumber(form.knownDistanceMeters);
+
+    if (distanceMeters === null || distanceMeters <= 0) {
+      setError("배치 저장에는 공통 거리 기준이 필요합니다. 12 yd 버튼을 누르거나 거리 값을 입력해 주세요.");
+      return;
+    }
+
+    const baseLabel = (form.label || linkAnalysis?.suggestedLabel || "Reference").trim();
+    const rows: Array<{
+      index: number;
+      sample: BatchSampleState;
+      knownSpeedKmh: number;
+      measuredSpeedKmh: number;
+      timingStartSeconds: number | null;
+      timingEndSeconds: number | null;
+    }> = [];
+    let validationError: string | null = null;
+
+    batchSamples.forEach((sample, index) => {
+      if (validationError) return;
+
+      const hasAnyValue = [
+        sample.knownSpeedKmh,
+        sample.measuredSpeedKmh,
+        sample.timingStartSeconds,
+        sample.timingEndSeconds,
+        sample.notes,
+      ].some((value) => value.trim().length > 0);
+
+      if (!hasAnyValue) return;
+
+      const knownSpeedKmh = parseFormNumber(sample.knownSpeedKmh);
+      const measuredInputKmh = parseFormNumber(sample.measuredSpeedKmh);
+      const timingStartSeconds = parseFormNumber(sample.timingStartSeconds);
+      const timingEndSeconds = parseFormNumber(sample.timingEndSeconds);
+      const hasPartialTiming =
+        (timingStartSeconds === null && timingEndSeconds !== null) ||
+        (timingStartSeconds !== null && timingEndSeconds === null);
+      const timingSpeedKmh = getTimingSpeedKmh(
+        form.knownDistanceMeters,
+        sample.timingStartSeconds,
+        sample.timingEndSeconds
+      );
+      const measuredSpeedKmh = measuredInputKmh ?? timingSpeedKmh;
+
+      if (knownSpeedKmh === null) {
+        validationError = `Row ${index + 1}: 실제 속도를 입력해 주세요.`;
+        return;
+      }
+
+      if (hasPartialTiming) {
+        validationError = `Row ${index + 1}: 시작/끝 시간을 모두 입력해 주세요.`;
+        return;
+      }
+
+      if (measuredSpeedKmh === null) {
+        validationError = `Row ${index + 1}: 앱 분석 속도를 입력하거나 유효한 시작/끝 시간을 입력해 주세요.`;
+        return;
+      }
+
+      rows.push({
+        index,
+        sample,
+        knownSpeedKmh,
+        measuredSpeedKmh,
+        timingStartSeconds,
+        timingEndSeconds,
+      });
+    });
+
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    if (rows.length === 0) {
+      setError("저장할 배치 샘플을 하나 이상 입력해 주세요.");
+      return;
+    }
+
+    setIsBatchSaving(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      for (const row of rows) {
+        const labelSuffix = row.sample.labelSuffix.trim() || `Clip ${row.index + 1}`;
+        const notes = [
+          form.notes.trim(),
+          row.sample.notes.trim(),
+          `Batch sample: ${labelSuffix}`,
+          `Distance: ${distanceMeters.toFixed(4)} m`,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+          .slice(0, 500);
+
+        const res = await fetch("/api/admin/references", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(adminToken ? { "x-admin-token": adminToken } : {}),
+          },
+          body: JSON.stringify({
+            label: `${baseLabel} - ${labelSuffix}`,
+            knownSpeedKmh: row.knownSpeedKmh,
+            measuredSpeedKmh: row.measuredSpeedKmh,
+            knownDistanceMeters: distanceMeters,
+            ballDisplacementPx: parseFormNumber(form.ballDisplacementPx),
+            bodyHeightPx: parseFormNumber(form.bodyHeightPx),
+            videoWidth: parseFormNumber(form.videoWidth),
+            videoHeight: parseFormNumber(form.videoHeight),
+            durationSeconds: parseFormNumber(form.durationSeconds),
+            fps: parseFormNumber(form.fps),
+            timingStartSeconds: row.timingStartSeconds,
+            timingEndSeconds: row.timingEndSeconds,
+            playerHeightCm: parseFormNumber(form.playerHeightCm),
+            cameraAngle: form.cameraAngle,
+            notes,
+            sourceFilename: form.sourceFilename,
+            sourceMimeType: form.sourceMimeType,
+            sourceSizeBytes: form.sourceSizeBytes,
+            sourceUrl: form.sourceUrl,
+          }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          setError(data.error ?? `${labelSuffix} 샘플을 저장하지 못했습니다.`);
+          return;
+        }
+      }
+
+      resetBatchSamples();
+      setMessage(`${rows.length}개 배치 샘플을 저장했습니다.`);
+      await loadReferences();
+    } catch {
+      setError("배치 샘플을 저장하지 못했습니다.");
+    } finally {
+      setIsBatchSaving(false);
     }
   };
 
@@ -937,6 +1200,194 @@ export default function ReferenceAdminPage() {
                     )}
                   </div>
                 )}
+
+                <div className="rounded-xl border border-[var(--color-neon-blue)]/25 bg-[var(--color-neon-blue)]/5 p-4">
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-mono text-[10px] tracking-widest text-[var(--color-neon-blue)]">
+                        MULTI SAMPLE
+                      </div>
+                      <div className="mt-1 text-sm font-bold text-white">Same video batch</div>
+                    </div>
+                    <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1 font-mono text-[10px] tracking-widest text-gray-400">
+                      {filledBatchSampleCount} READY
+                    </span>
+                  </div>
+
+                  <div className="mb-4 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                        Shared distance m
+                      </span>
+                      <input
+                        inputMode="decimal"
+                        value={form.knownDistanceMeters}
+                        onChange={(event) => updateForm("knownDistanceMeters", event.target.value)}
+                        className="min-w-0 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={applyTwelveYardPreset}
+                      className="self-end rounded-xl border border-[var(--color-neon-blue)]/40 px-4 py-3 text-sm font-black text-[var(--color-neon-blue)] transition-colors hover:bg-[var(--color-neon-blue)]/10"
+                    >
+                      12 yd
+                    </button>
+                  </div>
+
+                  <div className="mb-4 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={copyCurrentFormToBatch}
+                      className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10"
+                    >
+                      <Copy size={14} />
+                      Copy Current
+                    </button>
+                    <button
+                      type="button"
+                      onClick={addBatchSample}
+                      className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10"
+                    >
+                      <Plus size={14} />
+                      Add Row
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {batchSamples.map((sample, index) => {
+                      const rowTimingSpeedKmh = getTimingSpeedKmh(
+                        form.knownDistanceMeters,
+                        sample.timingStartSeconds,
+                        sample.timingEndSeconds
+                      );
+
+                      return (
+                        <div key={sample.id} className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                            <label className="flex flex-col gap-2">
+                              <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                                Clip label
+                              </span>
+                              <input
+                                value={sample.labelSuffix}
+                                onChange={(event) =>
+                                  updateBatchSample(sample.id, "labelSuffix", event.target.value)
+                                }
+                                className="min-w-0 rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => removeBatchSample(sample.id)}
+                              disabled={batchSamples.length <= 1}
+                              className="self-end rounded-lg border border-red-400/30 px-3 py-2 text-red-200 transition-colors hover:bg-red-400/10 disabled:cursor-not-allowed disabled:opacity-40"
+                              aria-label={`Remove row ${index + 1}`}
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="flex flex-col gap-2">
+                              <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                                Actual km/h
+                              </span>
+                              <input
+                                inputMode="decimal"
+                                value={sample.knownSpeedKmh}
+                                onChange={(event) =>
+                                  updateBatchSample(sample.id, "knownSpeedKmh", event.target.value)
+                                }
+                                className="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-2">
+                              <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                                App km/h
+                              </span>
+                              <input
+                                inputMode="decimal"
+                                value={sample.measuredSpeedKmh}
+                                onChange={(event) =>
+                                  updateBatchSample(sample.id, "measuredSpeedKmh", event.target.value)
+                                }
+                                className="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                              />
+                            </label>
+                          </div>
+
+                          <div className="mt-2 grid grid-cols-3 gap-2">
+                            <label className="flex flex-col gap-2">
+                              <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                                Start
+                              </span>
+                              <input
+                                inputMode="decimal"
+                                value={sample.timingStartSeconds}
+                                onChange={(event) =>
+                                  updateBatchSample(sample.id, "timingStartSeconds", event.target.value)
+                                }
+                                className="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-2">
+                              <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                                End
+                              </span>
+                              <input
+                                inputMode="decimal"
+                                value={sample.timingEndSeconds}
+                                onChange={(event) =>
+                                  updateBatchSample(sample.id, "timingEndSeconds", event.target.value)
+                                }
+                                className="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                              />
+                            </label>
+                            <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                              <div className="mb-1 font-mono text-[10px] tracking-widest text-gray-500">
+                                TIMING
+                              </div>
+                              <div className="text-lg font-black text-white">
+                                {formatNumber(rowTimingSpeedKmh)}
+                              </div>
+                            </div>
+                          </div>
+
+                          <label className="mt-2 flex flex-col gap-2">
+                            <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                              Row notes
+                            </span>
+                            <input
+                              value={sample.notes}
+                              onChange={(event) => updateBatchSample(sample.id, "notes", event.target.value)}
+                              className="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                            />
+                          </label>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-2">
+                    <button
+                      type="button"
+                      onClick={resetBatchSamples}
+                      className="rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10"
+                    >
+                      Reset Rows
+                    </button>
+                    <button
+                      type="button"
+                      onClick={saveBatchSamples}
+                      disabled={isBatchSaving || isSaving}
+                      className="flex items-center justify-center gap-2 rounded-lg bg-[var(--color-neon-blue)] px-3 py-2 text-sm font-black text-black transition-transform hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isBatchSaving ? <Loader2 className="animate-spin" size={16} /> : <Activity size={16} />}
+                      Save Batch
+                    </button>
+                  </div>
+                </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <label className="flex flex-col gap-2">
