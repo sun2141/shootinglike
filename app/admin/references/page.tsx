@@ -157,7 +157,7 @@ const EMPTY_FORM: FormState = {
   sourceUrl: "",
 };
 
-const TWELVE_YARDS_METERS = 10.9728;
+const YARD_TO_METER = 0.9144;
 const DEFAULT_BATCH_SAMPLE_COUNT = 5;
 const REFERENCE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 const REMOTE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm)(\?.*)?$/i;
@@ -204,6 +204,27 @@ function parseFormNumber(value: string) {
 
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseTimeSeconds(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (!trimmed.includes(":")) return parseFormNumber(trimmed);
+
+  const parts = trimmed.split(":").map((part) => part.trim());
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => part === "")) return null;
+
+  const parsedParts = parts.map(Number);
+  if (parsedParts.some((part) => !Number.isFinite(part) || part < 0)) return null;
+
+  if (parsedParts.length === 2) {
+    const [minutes, seconds] = parsedParts;
+    return minutes * 60 + seconds;
+  }
+
+  const [hours, minutes, seconds] = parsedParts;
+  return hours * 3600 + minutes * 60 + seconds;
 }
 
 function getSpeedErrorPercent(knownSpeedKmh: number | null | undefined, measuredSpeedKmh: number | null | undefined) {
@@ -255,8 +276,8 @@ function isHttpUrl(value: string) {
 
 function getTimingSpeedKmh(distanceMeters: string, startSeconds: string, endSeconds: string) {
   const distance = parseFormNumber(distanceMeters);
-  const start = parseFormNumber(startSeconds);
-  const end = parseFormNumber(endSeconds);
+  const start = parseTimeSeconds(startSeconds);
+  const end = parseTimeSeconds(endSeconds);
 
   if (distance === null || start === null || end === null || distance <= 0 || end <= start) {
     return null;
@@ -285,6 +306,7 @@ export default function ReferenceAdminPage() {
   const [batchSamples, setBatchSamples] = useState<BatchSampleState[]>(() =>
     Array.from({ length: DEFAULT_BATCH_SAMPLE_COUNT }, (_, index) => createBatchSample(index))
   );
+  const [distanceYards, setDistanceYards] = useState("12");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [adminToken, setAdminToken] = useState(() => {
     if (typeof window === "undefined") return "";
@@ -442,13 +464,22 @@ export default function ReferenceAdminPage() {
     setBatchSamples(Array.from({ length: DEFAULT_BATCH_SAMPLE_COUNT }, (_, index) => createBatchSample(index)));
   };
 
-  const applyTwelveYardPreset = () => {
+  const applyYardDistance = () => {
+    const yards = parseFormNumber(distanceYards);
+
+    if (yards === null || yards <= 0 || yards > 120) {
+      setError("유효한 yard 거리를 입력해 주세요.");
+      return;
+    }
+
+    const meters = yards * YARD_TO_METER;
+
     setForm((current) => ({
       ...current,
-      knownDistanceMeters: TWELVE_YARDS_METERS.toFixed(4),
-      notes: current.notes || "거리 기준: 12 yards (10.9728 m)",
+      knownDistanceMeters: meters.toFixed(4),
+      notes: current.notes || `거리 기준: ${yards} yards (${meters.toFixed(4)} m)`,
     }));
-    setMessage("12 yards 거리 기준을 적용했습니다.");
+    setMessage(`${yards} yards 거리 기준을 적용했습니다.`);
     setError(null);
   };
 
@@ -701,8 +732,8 @@ export default function ReferenceAdminPage() {
           videoHeight: parseFormNumber(form.videoHeight),
           durationSeconds: parseFormNumber(form.durationSeconds),
           fps: parseFormNumber(form.fps),
-          timingStartSeconds: parseFormNumber(form.timingStartSeconds),
-          timingEndSeconds: parseFormNumber(form.timingEndSeconds),
+          timingStartSeconds: parseTimeSeconds(form.timingStartSeconds),
+          timingEndSeconds: parseTimeSeconds(form.timingEndSeconds),
           timingSpeedKmh,
           playerHeightCm: parseFormNumber(form.playerHeightCm),
           cameraAngle: form.cameraAngle,
@@ -734,7 +765,7 @@ export default function ReferenceAdminPage() {
     const distanceMeters = parseFormNumber(form.knownDistanceMeters);
 
     if (distanceMeters === null || distanceMeters <= 0) {
-      setError("배치 저장에는 공통 거리 기준이 필요합니다. 12 yd 버튼을 누르거나 거리 값을 입력해 주세요.");
+      setError("배치 저장에는 공통 거리 기준이 필요합니다. yard 값을 적용하거나 meter 값을 입력해 주세요.");
       return;
     }
 
@@ -764,8 +795,8 @@ export default function ReferenceAdminPage() {
 
       const knownSpeedKmh = parseFormNumber(sample.knownSpeedKmh);
       const measuredInputKmh = parseFormNumber(sample.measuredSpeedKmh);
-      const timingStartSeconds = parseFormNumber(sample.timingStartSeconds);
-      const timingEndSeconds = parseFormNumber(sample.timingEndSeconds);
+      const timingStartSeconds = parseTimeSeconds(sample.timingStartSeconds);
+      const timingEndSeconds = parseTimeSeconds(sample.timingEndSeconds);
       const hasPartialTiming =
         (timingStartSeconds === null && timingEndSeconds !== null) ||
         (timingStartSeconds !== null && timingEndSeconds === null);
@@ -1205,19 +1236,30 @@ export default function ReferenceAdminPage() {
                   <div className="mb-4 flex items-start justify-between gap-3">
                     <div>
                       <div className="font-mono text-[10px] tracking-widest text-[var(--color-neon-blue)]">
-                        MULTI SAMPLE
+                        MANUAL SEGMENTS
                       </div>
-                      <div className="mt-1 text-sm font-bold text-white">Same video batch</div>
+                      <div className="mt-1 text-sm font-bold text-white">Same source batch</div>
                     </div>
                     <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1 font-mono text-[10px] tracking-widest text-gray-400">
                       {filledBatchSampleCount} READY
                     </span>
                   </div>
 
-                  <div className="mb-4 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                  <div className="mb-4 grid grid-cols-2 gap-2">
                     <label className="flex flex-col gap-2">
                       <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
-                        Shared distance m
+                        Distance yd
+                      </span>
+                      <input
+                        inputMode="decimal"
+                        value={distanceYards}
+                        onChange={(event) => setDistanceYards(event.target.value)}
+                        className="min-w-0 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                        Distance m
                       </span>
                       <input
                         inputMode="decimal"
@@ -1226,12 +1268,15 @@ export default function ReferenceAdminPage() {
                         className="min-w-0 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-sm outline-none focus:border-[var(--color-neon-blue)]"
                       />
                     </label>
+                  </div>
+
+                  <div className="mb-4 grid grid-cols-1 gap-2">
                     <button
                       type="button"
-                      onClick={applyTwelveYardPreset}
-                      className="self-end rounded-xl border border-[var(--color-neon-blue)]/40 px-4 py-3 text-sm font-black text-[var(--color-neon-blue)] transition-colors hover:bg-[var(--color-neon-blue)]/10"
+                      onClick={applyYardDistance}
+                      className="rounded-xl border border-[var(--color-neon-blue)]/40 px-4 py-3 text-sm font-black text-[var(--color-neon-blue)] transition-colors hover:bg-[var(--color-neon-blue)]/10"
                     >
-                      12 yd
+                      Apply Yards
                     </button>
                   </div>
 
