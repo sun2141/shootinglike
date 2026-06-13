@@ -1720,11 +1720,36 @@ export default function ReferenceAdminPage() {
     }
   };
 
+  const applyAiSegmentDraftRows = (draft: AiSegmentDraft, successMessage: string) => {
+    nextBatchSampleIdRef.current = draft.segments.length;
+    setBatchSamples(
+      draft.segments.map((segment, index) => ({
+        id: `ai-${index}-${segment.startSeconds}`,
+        labelSuffix: getAiDraftBatchLabel(segment, index),
+        knownSpeedKmh: segment.visibleSpeedKmh !== null ? segment.visibleSpeedKmh.toFixed(1) : "",
+        measuredSpeedKmh: "",
+        timingStartSeconds: segment.startSeconds.toFixed(3),
+        timingEndSeconds: segment.endSeconds.toFixed(3),
+        notes: [
+          `AI evidence: ${segment.evidence}`,
+          `Confidence: ${Math.round(segment.confidence * 100)}%`,
+          segment.needsReview ? "Needs timestamp review" : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      }))
+    );
+    releaseCutClips();
+    setClipCutProgress({ current: 0, total: 0, label: "" });
+    setMessage(successMessage);
+    setError(null);
+  };
+
   const parsePastedAiSegments = () => {
     const draft = parsePastedAiDraft(pastedAiDraftText);
 
     if (!draft) {
-      setAiSegmentError("붙여넣은 내용에서 구간을 찾지 못했습니다. JSON, Markdown 표, FFmpeg 명령어 형식을 확인해 주세요.");
+      setAiSegmentError("코드에서 구간을 찾지 못했습니다. FFmpeg 명령어, JSON, Markdown 표 형식을 확인해 주세요.");
       return;
     }
 
@@ -1735,8 +1760,10 @@ export default function ReferenceAdminPage() {
       updateForm("knownDistanceMeters", draft.distanceCueMeters.toFixed(3));
     }
 
-    setMessage(`${draft.segments.length}개 붙여넣기 구간 초안을 만들었습니다. 확인 후 적용하세요.`);
-    setError(null);
+    applyAiSegmentDraftRows(
+      draft,
+      `${draft.segments.length}개 코드 구간을 Manual Segments에 적용했습니다. 저장/커팅 전에 시간을 확인하세요.`
+    );
   };
 
   const analyzeVideoSegments = async () => {
@@ -1786,42 +1813,15 @@ export default function ReferenceAdminPage() {
         updateForm("knownDistanceMeters", data.draft.distanceCueMeters.toFixed(3));
       }
 
-      setMessage(`${data.draft.segments.length}개 AI 구간 초안을 만들었습니다. 확인 후 적용하세요.`);
+      applyAiSegmentDraftRows(
+        data.draft,
+        `${data.draft.segments.length}개 AI 구간을 Manual Segments에 적용했습니다. 저장/커팅 전에 시간을 확인하세요.`
+      );
     } catch {
       setAiSegmentError("AI 구간 분석에 실패했습니다.");
     } finally {
       setIsAnalyzingVideoSegments(false);
     }
-  };
-
-  const applyAiSegmentDraft = () => {
-    if (!aiSegmentDraft || aiSegmentDraft.segments.length === 0) {
-      setError("적용할 AI 구간 초안이 없습니다.");
-      return;
-    }
-
-    nextBatchSampleIdRef.current = aiSegmentDraft.segments.length;
-    setBatchSamples(
-      aiSegmentDraft.segments.map((segment, index) => ({
-        id: `ai-${index}-${segment.startSeconds}`,
-        labelSuffix: getAiDraftBatchLabel(segment, index),
-        knownSpeedKmh: segment.visibleSpeedKmh !== null ? segment.visibleSpeedKmh.toFixed(1) : "",
-        measuredSpeedKmh: "",
-        timingStartSeconds: segment.startSeconds.toFixed(3),
-        timingEndSeconds: segment.endSeconds.toFixed(3),
-        notes: [
-          `AI evidence: ${segment.evidence}`,
-          `Confidence: ${Math.round(segment.confidence * 100)}%`,
-          segment.needsReview ? "Needs timestamp review" : "",
-        ]
-          .filter(Boolean)
-          .join(" · "),
-      }))
-    );
-    releaseCutClips();
-    setClipCutProgress({ current: 0, total: 0, label: "" });
-    setMessage("AI 구간 초안을 Manual Segments에 적용했습니다. 저장/커팅 전에 시간을 확인하세요.");
-    setError(null);
   };
 
   const cutBatchClips = async () => {
@@ -2124,11 +2124,11 @@ export default function ReferenceAdminPage() {
                   </button>
                 </div>
 
-                <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
-                  <div className="mb-3 flex items-center justify-between gap-3">
+                <details className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                     <div>
-                      <div className="font-mono text-[10px] tracking-widest text-gray-500">PIXEL CAPTURE</div>
-                      <div className="mt-1 text-sm font-bold text-white">Analysis-scale measurement</div>
+                      <div className="font-mono text-[10px] tracking-widest text-gray-500">ADVANCED MEASUREMENT</div>
+                      <div className="mt-1 text-sm font-bold text-white">Pixel capture</div>
                     </div>
                     <span
                       className={`rounded-full border px-3 py-1 font-mono text-[10px] tracking-widest ${
@@ -2139,9 +2139,9 @@ export default function ReferenceAdminPage() {
                     >
                       {playableVideoUrl ? "READY" : "LOCAL VIDEO NEEDED"}
                     </span>
-                  </div>
+                  </summary>
 
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="mt-3 grid grid-cols-3 gap-2">
                     <button
                       type="button"
                       onClick={() => startMeasurementMode("height")}
@@ -2192,7 +2192,7 @@ export default function ReferenceAdminPage() {
                       YouTube iframe은 정확한 픽셀 좌표계를 보장하지 않습니다. 같은 원본 영상을 로컬 미리보기로 올린 뒤 측정하세요.
                     </div>
                   )}
-                </div>
+                </details>
               </div>
 
               <div className="flex flex-col gap-4 p-5">
@@ -2223,7 +2223,11 @@ export default function ReferenceAdminPage() {
                   />
                 </label>
 
-                <div className="flex flex-col gap-2">
+                <details className="rounded-xl border border-white/10 bg-white/5 p-4">
+                  <summary className="cursor-pointer list-none font-mono text-[10px] tracking-widest text-gray-500">
+                    OPTIONAL SOURCE METADATA
+                  </summary>
+                  <div className="mt-3 flex flex-col gap-2">
                   <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-gray-500">
                     <Link2 size={13} />
                     Source URL
@@ -2245,7 +2249,7 @@ export default function ReferenceAdminPage() {
                       Analyze
                     </button>
                   </div>
-                </div>
+                  </div>
 
                 {(linkAnalysis || isAnalyzingLink || linkAnalysisError) && (
                   <div className="rounded-xl border border-white/10 bg-white/5 p-4">
@@ -2347,6 +2351,7 @@ export default function ReferenceAdminPage() {
                     )}
                   </div>
                 )}
+                </details>
 
                 <div className="rounded-xl border border-[var(--color-neon-blue)]/25 bg-[var(--color-neon-blue)]/5 p-4">
                   <div className="mb-4 flex items-start justify-between gap-3">
@@ -2361,69 +2366,20 @@ export default function ReferenceAdminPage() {
                     </span>
                   </div>
 
-                  <div className="mb-4 grid grid-cols-2 gap-2">
-                    <label className="flex flex-col gap-2">
-                      <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
-                        Distance yd
-                      </span>
-                      <input
-                        inputMode="decimal"
-                        value={distanceYards}
-                        onChange={(event) => setDistanceYards(event.target.value)}
-                        className="min-w-0 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-sm outline-none focus:border-[var(--color-neon-blue)]"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2">
-                      <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
-                        Distance m
-                      </span>
-                      <input
-                        inputMode="decimal"
-                        value={form.knownDistanceMeters}
-                        onChange={(event) => updateForm("knownDistanceMeters", event.target.value)}
-                        className="min-w-0 rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-sm outline-none focus:border-[var(--color-neon-blue)]"
-                      />
-                    </label>
-                  </div>
-
-                  <div className="mb-4 grid grid-cols-1 gap-2">
-                    <button
-                      type="button"
-                      onClick={applyYardDistance}
-                      className="rounded-xl border border-[var(--color-neon-blue)]/40 px-4 py-3 text-sm font-black text-[var(--color-neon-blue)] transition-colors hover:bg-[var(--color-neon-blue)]/10"
-                    >
-                      Apply Yards
-                    </button>
-                  </div>
-
-                  <div className="mb-4 rounded-xl border border-[var(--color-neon-green)]/25 bg-[var(--color-neon-green)]/5 p-3">
+                  <div className="mb-4 rounded-xl border border-[var(--color-neon-green)]/30 bg-[var(--color-neon-green)]/5 p-4">
                     <div className="mb-3 flex items-start justify-between gap-3">
                       <div>
                         <div className="font-mono text-[10px] tracking-widest text-[var(--color-neon-green)]">
-                          AI SEGMENT DRAFT
+                          GEMINI / FFMPEG CODE
                         </div>
-                        <div className="mt-1 text-sm font-bold text-white">Detect reviewable kick clips</div>
+                        <div className="mt-1 text-sm font-bold text-white">Paste commands and fill rows</div>
                       </div>
                       <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1 font-mono text-[10px] tracking-widest text-gray-400">
                         {aiSegmentDraft?.segments.length ?? 0} FOUND
                       </span>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={analyzeVideoSegments}
-                      disabled={!videoFile || isAnalyzingVideoSegments || isSaving || isBatchSaving || isCuttingClips}
-                      className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-neon-green)] px-3 py-2 text-sm font-black text-black transition-transform hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      {isAnalyzingVideoSegments ? (
-                        <Loader2 className="animate-spin" size={16} />
-                      ) : (
-                        <Activity size={16} />
-                      )}
-                      Analyze Video
-                    </button>
-
-                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-[auto_minmax(0,1fr)]">
                       <button
                         type="button"
                         onClick={copyGeminiSegmentPrompt}
@@ -2436,26 +2392,39 @@ export default function ReferenceAdminPage() {
                         type="button"
                         onClick={parsePastedAiSegments}
                         disabled={!pastedAiDraftText.trim()}
-                        className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                        className="flex items-center justify-center gap-2 rounded-lg bg-[var(--color-neon-green)] px-3 py-2 text-sm font-black text-black transition-transform hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        <CheckCircle2 size={14} />
-                        Parse Paste
+                        <PlayCircle size={15} />
+                        Run Code
                       </button>
                     </div>
 
                     <textarea
                       value={pastedAiDraftText}
                       onChange={(event) => setPastedAiDraftText(event.target.value)}
-                      rows={5}
-                      placeholder="Paste Gemini JSON, Markdown table, or FFmpeg commands"
+                      rows={7}
+                      placeholder="ffmpeg -i input.mp4 -ss 00:01:54 -to 00:02:05 -c copy 01_Nicky_55mph.mp4"
                       className="mt-3 w-full resize-y rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs leading-relaxed text-gray-200 outline-none placeholder:text-gray-600 focus:border-[var(--color-neon-green)]"
                     />
 
-                    {!videoFile && (
-                      <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3 text-xs leading-relaxed text-gray-400">
-                        로컬 영상을 불러오면 API 분석도 사용할 수 있습니다.
-                      </div>
-                    )}
+                    <details className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+                      <summary className="cursor-pointer list-none font-mono text-[10px] tracking-widest text-gray-500">
+                        API VIDEO ANALYSIS
+                      </summary>
+                      <button
+                        type="button"
+                        onClick={analyzeVideoSegments}
+                        disabled={!videoFile || isAnalyzingVideoSegments || isSaving || isBatchSaving || isCuttingClips}
+                        className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {isAnalyzingVideoSegments ? (
+                          <Loader2 className="animate-spin" size={16} />
+                        ) : (
+                          <Activity size={16} />
+                        )}
+                        Analyze Local Video
+                      </button>
+                    </details>
 
                     {aiSegmentError && (
                       <div className="mt-3 rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-100">
@@ -2524,16 +2493,43 @@ export default function ReferenceAdminPage() {
                             ))}
                           </div>
                         )}
-
-                        <button
-                          type="button"
-                          onClick={applyAiSegmentDraft}
-                          className="w-full rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10"
-                        >
-                          Apply Draft to Rows
-                        </button>
                       </div>
                     )}
+                  </div>
+
+                  <div className="mb-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="mb-3 font-mono text-[10px] tracking-widest text-gray-500">DISTANCE BASELINE</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="flex flex-col gap-2">
+                        <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                          Distance yd
+                        </span>
+                        <input
+                          inputMode="decimal"
+                          value={distanceYards}
+                          onChange={(event) => setDistanceYards(event.target.value)}
+                          className="min-w-0 rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2">
+                        <span className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                          Distance m
+                        </span>
+                        <input
+                          inputMode="decimal"
+                          value={form.knownDistanceMeters}
+                          onChange={(event) => updateForm("knownDistanceMeters", event.target.value)}
+                          className="min-w-0 rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-blue)]"
+                        />
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={applyYardDistance}
+                      className="mt-2 w-full rounded-lg border border-[var(--color-neon-blue)]/40 px-3 py-2 text-sm font-black text-[var(--color-neon-blue)] transition-colors hover:bg-[var(--color-neon-blue)]/10"
+                    >
+                      Apply Yards
+                    </button>
                   </div>
 
                   <div className="mb-4 grid grid-cols-2 gap-2">
