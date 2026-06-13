@@ -8,16 +8,19 @@ import {
   CheckCircle2,
   Copy,
   Database,
+  Download,
   ExternalLink,
   Link2,
   Loader2,
   PauseCircle,
   PlayCircle,
   Plus,
+  Scissors,
   Shield,
   Trash2,
   Upload,
 } from "lucide-react";
+import type { FFmpeg } from "@ffmpeg/ffmpeg";
 import { getAnalysisFrameSize } from "@/lib/analysis/frame-size";
 import { calculateDistance, type Point } from "@/lib/analysis/math";
 
@@ -105,6 +108,34 @@ interface LinkAnalysisResponse {
   error?: string;
 }
 
+interface AiSegmentDraftRow {
+  label: string;
+  player: string | null;
+  kickType: string | null;
+  startSeconds: number;
+  endSeconds: number;
+  visibleSpeedValue: number | null;
+  visibleSpeedUnit: string | null;
+  visibleSpeedKmh: number | null;
+  confidence: number;
+  evidence: string;
+  needsReview: boolean;
+}
+
+interface AiSegmentDraft {
+  summary: string;
+  distanceCueMeters: number | null;
+  warnings: string[];
+  segments: AiSegmentDraftRow[];
+}
+
+interface AiSegmentAnalysisResponse {
+  provider?: string;
+  model?: string;
+  draft?: AiSegmentDraft;
+  error?: string;
+}
+
 interface FormState {
   label: string;
   knownSpeedKmh: string;
@@ -137,6 +168,29 @@ interface BatchSampleState {
   notes: string;
 }
 
+interface BatchClipRow {
+  index: number;
+  sample: BatchSampleState;
+  startSeconds: number;
+  endSeconds: number;
+  knownSpeedKmh: number | null;
+}
+
+interface CutClipResult {
+  id: string;
+  name: string;
+  url: string;
+  sizeBytes: number;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+interface ClipCutProgress {
+  current: number;
+  total: number;
+  label: string;
+}
+
 type MeasureMode = "none" | "height" | "ball";
 
 const EMPTY_FORM: FormState = {
@@ -165,6 +219,44 @@ const YARD_TO_METER = 0.9144;
 const DEFAULT_BATCH_SAMPLE_COUNT = 5;
 const REFERENCE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 const REMOTE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm)(\?.*)?$/i;
+const GEMINI_SEGMENT_PROMPT = `이 영상은 축구 슈팅/페널티킥/프리킥 분석용 레퍼런스 데이터베이스를 만들기 위한 원본 영상입니다.
+
+목표:
+1. 속도 표시, 스피드건, 자막, 화면 숫자 등 실제 속도 근거가 보이는 킥 장면을 찾습니다.
+2. 각 킥마다 짧게 자를 수 있는 시작/끝 타임스탬프를 제안합니다.
+3. 레퍼런스 DB에서 실제 속도와 앱 분석 속도를 비교해 보정할 수 있도록, 사람이 검수하기 쉬운 JSON만 출력합니다.
+
+구간 선택 기준:
+- startSeconds: 킥 직전 준비/런업이 조금 포함되도록 잡습니다.
+- endSeconds: 공 궤적과 속도 표시가 확인될 때까지 포함합니다.
+- 속도 값이 mph로 보이면 visibleSpeedUnit은 "mph", visibleSpeedKmh는 mph * 1.609344로 환산합니다.
+- 속도 값이 km/h로 보이면 visibleSpeedUnit은 "km/h", visibleSpeedKmh는 같은 값을 넣습니다.
+- 숫자가 불확실하거나 가려져 있으면 visibleSpeedValue와 visibleSpeedKmh는 null로 두고 needsReview를 true로 둡니다.
+- 실제 거리 기준이 확실히 보일 때만 distanceCueMeters를 넣고, 아니면 null로 둡니다.
+- 확신도를 confidence 0~1로 넣습니다.
+
+반드시 아래 JSON 형식만 출력하세요. 설명 문장, 마크다운 코드블록, 표는 넣지 마세요.
+
+{
+  "summary": "짧은 분석 요약",
+  "distanceCueMeters": null,
+  "warnings": ["검수자가 확인해야 할 점"],
+  "segments": [
+    {
+      "label": "Nicky normal kick 1 55mph",
+      "player": "Nicky",
+      "kickType": "normal kick 1",
+      "startSeconds": 114.0,
+      "endSeconds": 125.0,
+      "visibleSpeedValue": 55,
+      "visibleSpeedUnit": "mph",
+      "visibleSpeedKmh": 88.5,
+      "confidence": 0.82,
+      "evidence": "화면 우측 속도 오버레이에 55 mph가 보임",
+      "needsReview": true
+    }
+  ]
+}`;
 
 function createBatchSample(index: number, id = `batch-${index}`): BatchSampleState {
   return {
@@ -229,6 +321,435 @@ function parseTimeSeconds(value: string) {
 
   const [hours, minutes, seconds] = parsedParts;
   return hours * 3600 + minutes * 60 + seconds;
+}
+
+function formatTimestamp(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "00:00:00.000";
+
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const wholeSeconds = Math.floor(seconds % 60);
+  const milliseconds = Math.round((seconds - Math.floor(seconds)) * 1000);
+
+  return [
+    hours.toString().padStart(2, "0"),
+    minutes.toString().padStart(2, "0"),
+    wholeSeconds.toString().padStart(2, "0"),
+  ].join(":") + `.${milliseconds.toString().padStart(3, "0")}`;
+}
+
+function sanitizeFilePart(value: string, fallback: string) {
+  const sanitized = value
+    .trim()
+    .replace(/[^\p{L}\p{N}._-]+/gu, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+
+  return sanitized || fallback;
+}
+
+function getInputFileName(file: File) {
+  const extension = file.name.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase() ?? ".mp4";
+  return `input${extension}`;
+}
+
+function getCutOutputName(baseLabel: string, row: BatchClipRow) {
+  const index = String(row.index + 1).padStart(2, "0");
+  const label = sanitizeFilePart(row.sample.labelSuffix || `Clip ${row.index + 1}`, `Clip_${index}`);
+  const speed = row.knownSpeedKmh !== null ? `_${Math.round(row.knownSpeedKmh)}kmh` : "";
+  const prefix = sanitizeFilePart(baseLabel, "Reference");
+
+  return `${index}_${prefix}_${label}${speed}.mp4`;
+}
+
+function getAiSpeedLabel(segment: AiSegmentDraftRow) {
+  if (segment.visibleSpeedValue !== null && segment.visibleSpeedUnit) {
+    return `${formatNumber(segment.visibleSpeedValue)} ${segment.visibleSpeedUnit}`;
+  }
+
+  if (segment.visibleSpeedKmh !== null) return `${formatNumber(segment.visibleSpeedKmh)} km/h`;
+
+  return "speed check needed";
+}
+
+function getAiDraftBatchLabel(segment: AiSegmentDraftRow, index: number) {
+  const parts = [segment.player, segment.kickType, getAiSpeedLabel(segment)]
+    .filter((part) => part && part !== "speed check needed")
+    .map((part) => String(part).trim());
+
+  return parts.length > 0 ? parts.join(" ") : segment.label || `Clip ${index + 1}`;
+}
+
+function parseUnknownNumber(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+
+  const parsed = Number(value.trim().replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseUnknownBoolean(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+
+  const normalized = value.trim().toLowerCase();
+  return ["true", "yes", "y", "1", "review", "needs review", "확인", "검수"].includes(normalized);
+}
+
+function getTextValue(value: unknown, maxLength = 120) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replace(/\s+/g, " ").slice(0, maxLength);
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeSpeedUnit(value: string | null) {
+  if (!value) return null;
+
+  const normalized = value.toLowerCase().replace(/[^a-z/]/g, "");
+  if (normalized === "mph") return "mph";
+  if (["kmh", "kph", "km/h"].includes(normalized)) return "km/h";
+  if (["ms", "m/s", "mps"].includes(normalized)) return "m/s";
+  return value.slice(0, 16);
+}
+
+function getVisibleSpeedKmh(value: number | null, unit: string | null, fallback: number | null) {
+  if (fallback !== null && fallback > 0 && fallback < 300) return fallback;
+  if (value === null || value <= 0) return null;
+
+  const normalized = normalizeSpeedUnit(unit);
+  if (normalized === "mph") return value * 1.609344;
+  if (normalized === "m/s") return value * 3.6;
+  if (normalized === "km/h") return value;
+
+  return null;
+}
+
+function parseSpeedCell(value: unknown) {
+  if (typeof value === "number") {
+    return { visibleSpeedValue: value, visibleSpeedUnit: null, visibleSpeedKmh: null };
+  }
+
+  if (typeof value !== "string") {
+    return { visibleSpeedValue: null, visibleSpeedUnit: null, visibleSpeedKmh: null };
+  }
+
+  const match = value.match(/(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh|kph|m\/s|mps|ms)?/i);
+  if (!match) return { visibleSpeedValue: null, visibleSpeedUnit: null, visibleSpeedKmh: null };
+
+  const visibleSpeedValue = parseUnknownNumber(match[1]);
+  const visibleSpeedUnit = normalizeSpeedUnit(match[2] ?? null);
+
+  return {
+    visibleSpeedValue,
+    visibleSpeedUnit,
+    visibleSpeedKmh: getVisibleSpeedKmh(visibleSpeedValue, visibleSpeedUnit, null),
+  };
+}
+
+function normalizeAiSegment(input: unknown, index: number): AiSegmentDraftRow | null {
+  if (!input || typeof input !== "object") return null;
+
+  const row = input as Record<string, unknown>;
+  const startSeconds =
+    parseUnknownNumber(row.startSeconds) ??
+    parseUnknownNumber(row.start) ??
+    parseTimeSeconds(String(row.startTime ?? row.start_time ?? ""));
+  const endSeconds =
+    parseUnknownNumber(row.endSeconds) ??
+    parseUnknownNumber(row.end) ??
+    parseTimeSeconds(String(row.endTime ?? row.end_time ?? ""));
+
+  if (startSeconds === null || endSeconds === null || startSeconds < 0 || endSeconds <= startSeconds) {
+    return null;
+  }
+
+  const speedFromCell = parseSpeedCell(row.speed ?? row.visibleSpeed ?? row.visible_speed);
+  const visibleSpeedValue =
+    parseUnknownNumber(row.visibleSpeedValue) ?? parseUnknownNumber(row.speedValue) ?? speedFromCell.visibleSpeedValue;
+  const visibleSpeedUnit =
+    normalizeSpeedUnit(getTextValue(row.visibleSpeedUnit ?? row.speedUnit, 16)) ?? speedFromCell.visibleSpeedUnit;
+  const visibleSpeedKmh = getVisibleSpeedKmh(
+    visibleSpeedValue,
+    visibleSpeedUnit,
+    parseUnknownNumber(row.visibleSpeedKmh) ?? parseUnknownNumber(row.speedKmh) ?? speedFromCell.visibleSpeedKmh
+  );
+  const player = getTextValue(row.player ?? row.선수, 60);
+  const kickType = getTextValue(row.kickType ?? row.type ?? row["킥 유형"], 80);
+  const explicitLabel = getTextValue(row.label ?? row.clip ?? row.name, 80);
+  const derivedLabel = [
+    player,
+    kickType,
+    visibleSpeedValue && visibleSpeedUnit ? `${visibleSpeedValue}${visibleSpeedUnit}` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const label = explicitLabel ?? (derivedLabel || `Clip ${index + 1}`);
+
+  return {
+    label,
+    player,
+    kickType,
+    startSeconds,
+    endSeconds,
+    visibleSpeedValue,
+    visibleSpeedUnit,
+    visibleSpeedKmh,
+    confidence: Math.max(0, Math.min(1, parseUnknownNumber(row.confidence) ?? 0.65)),
+    evidence: getTextValue(row.evidence ?? row.notes ?? row.note, 240) ?? "Pasted AI draft row.",
+    needsReview: parseUnknownBoolean(row.needsReview ?? row.review ?? row.needs_review) || true,
+  };
+}
+
+function normalizeAiDraft(input: unknown, sourceLabel: string): AiSegmentDraft | null {
+  if (Array.isArray(input)) {
+    const segments = input
+      .map((segment, index) => normalizeAiSegment(segment, index))
+      .filter((segment): segment is AiSegmentDraftRow => Boolean(segment));
+
+    if (segments.length === 0) return null;
+
+    return {
+      summary: `${sourceLabel}에서 ${segments.length}개 구간을 가져왔습니다.`,
+      distanceCueMeters: null,
+      warnings: ["붙여넣은 결과입니다. 저장/커팅 전 타임스탬프와 속도를 확인하세요."],
+      segments,
+    };
+  }
+
+  if (!input || typeof input !== "object") return null;
+
+  const raw = input as Record<string, unknown>;
+  const rawSegments = Array.isArray(raw.segments)
+    ? raw.segments
+    : Array.isArray(raw.clips)
+      ? raw.clips
+      : Array.isArray(raw.rows)
+        ? raw.rows
+        : [];
+  const segments = rawSegments
+    .map((segment, index) => normalizeAiSegment(segment, index))
+    .filter((segment): segment is AiSegmentDraftRow => Boolean(segment));
+
+  if (segments.length === 0) return null;
+
+  const warnings = Array.isArray(raw.warnings)
+    ? raw.warnings.map((warning) => getTextValue(warning, 180)).filter((warning): warning is string => Boolean(warning))
+    : [];
+
+  return {
+    summary: getTextValue(raw.summary, 300) ?? `${sourceLabel}에서 ${segments.length}개 구간을 가져왔습니다.`,
+    distanceCueMeters: parseUnknownNumber(raw.distanceCueMeters),
+    warnings,
+    segments,
+  };
+}
+
+function parseJsonDraft(text: string) {
+  const trimmed = text.trim();
+  const candidates = [
+    trimmed,
+    trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim(),
+    trimmed.includes("{") ? trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1) : null,
+    trimmed.includes("[") ? trimmed.slice(trimmed.indexOf("["), trimmed.lastIndexOf("]") + 1) : null,
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as unknown;
+    } catch {
+      // Try the next extraction shape.
+    }
+  }
+
+  return null;
+}
+
+function normalizeHeader(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[()]/g, "");
+}
+
+function getMappedCell(row: Record<string, string>, keys: string[]) {
+  for (const key of keys) {
+    const value = row[key];
+    if (value) return value;
+  }
+
+  return "";
+}
+
+function parseTableDraft(text: string) {
+  const tableLines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.includes("|") && !/^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$/.test(line));
+
+  if (tableLines.length < 2) return null;
+
+  const headers = tableLines[0]
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map(normalizeHeader);
+  const rows = tableLines.slice(1).map((line) => {
+    const cells = line
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+    return headers.reduce<Record<string, string>>((acc, header, index) => {
+      acc[header] = cells[index] ?? "";
+      return acc;
+    }, {});
+  });
+
+  const segments = rows
+    .map((row, index) => {
+      const segmentRange = getMappedCell(row, ["영상구간시작-끝", "영상구간", "구간", "time", "timerange", "segment"]);
+      const [rangeStart = "", rangeEnd = ""] = segmentRange.split(/\s*(?:-|~|–|—|to)\s*/i);
+      const speedCell = getMappedCell(row, ["속도mph", "속도", "speedmph", "speed", "actualspeed"]);
+      const speed = parseSpeedCell(speedCell);
+      const unitFromHeader = Object.keys(row).find((key) => key.includes("mph"))
+        ? "mph"
+        : Object.keys(row).find((key) => key.includes("kmh") || key.includes("km/h"))
+          ? "km/h"
+          : null;
+      const visibleSpeedUnit = speed.visibleSpeedUnit ?? unitFromHeader;
+      const visibleSpeedValue = speed.visibleSpeedValue;
+      const visibleSpeedKmh = getVisibleSpeedKmh(visibleSpeedValue, visibleSpeedUnit, speed.visibleSpeedKmh);
+      const player = getTextValue(getMappedCell(row, ["선수", "player"]), 60);
+      const kickType = getTextValue(getMappedCell(row, ["킥유형", "유형", "kicktype", "type"]), 80);
+
+      return normalizeAiSegment(
+        {
+          label: getMappedCell(row, ["label", "clip", "name"]) || [player, kickType].filter(Boolean).join(" "),
+          player,
+          kickType,
+          startSeconds: parseTimeSeconds(getMappedCell(row, ["startseconds", "start", "시작"]) || rangeStart),
+          endSeconds: parseTimeSeconds(getMappedCell(row, ["endseconds", "end", "끝"]) || rangeEnd),
+          visibleSpeedValue,
+          visibleSpeedUnit,
+          visibleSpeedKmh,
+          confidence: parseUnknownNumber(getMappedCell(row, ["confidence", "확신도"])) ?? 0.65,
+          evidence: getMappedCell(row, ["evidence", "근거", "notes", "note"]) || "Pasted Markdown table row.",
+          needsReview: true,
+        },
+        index
+      );
+    })
+    .filter((segment): segment is AiSegmentDraftRow => Boolean(segment));
+
+  if (segments.length === 0) return null;
+
+  return {
+    summary: `Markdown 표에서 ${segments.length}개 구간을 가져왔습니다.`,
+    distanceCueMeters: null,
+    warnings: ["표에서 가져온 결과입니다. 속도 단위와 시작/끝 시간을 확인하세요."],
+    segments,
+  };
+}
+
+function parseFfmpegDraft(text: string) {
+  const segments = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("ffmpeg "))
+    .map((line, index) => {
+      const start = line.match(/\s-ss\s+(\S+)/)?.[1] ?? "";
+      const end = line.match(/\s-to\s+(\S+)/)?.[1] ?? "";
+      const duration = line.match(/\s-t\s+(\S+)/)?.[1] ?? "";
+      const output = line.match(/\s([^\s]+\.mp4)\s*$/i)?.[1] ?? `Clip ${index + 1}`;
+      const startSeconds = parseTimeSeconds(start);
+      const endSeconds =
+        parseTimeSeconds(end) ??
+        (startSeconds !== null && parseTimeSeconds(duration) !== null
+          ? startSeconds + (parseTimeSeconds(duration) ?? 0)
+          : null);
+      const speed = parseSpeedCell(output.replace(/_/g, " "));
+      const label = output.replace(/\.mp4$/i, "").replace(/^\d+_?/, "").replace(/_/g, " ");
+
+      return normalizeAiSegment(
+        {
+          label,
+          startSeconds,
+          endSeconds,
+          visibleSpeedValue: speed.visibleSpeedValue,
+          visibleSpeedUnit: speed.visibleSpeedUnit,
+          visibleSpeedKmh: speed.visibleSpeedKmh,
+          confidence: 0.7,
+          evidence: "Pasted FFmpeg cut command.",
+          needsReview: true,
+        },
+        index
+      );
+    })
+    .filter((segment): segment is AiSegmentDraftRow => Boolean(segment));
+
+  if (segments.length === 0) return null;
+
+  return {
+    summary: `FFmpeg 명령어에서 ${segments.length}개 구간을 가져왔습니다.`,
+    distanceCueMeters: null,
+    warnings: ["FFmpeg 명령어에서 가져온 결과입니다. 실제 속도와 선수명을 확인하세요."],
+    segments,
+  };
+}
+
+function parsePastedAiDraft(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const json = parseJsonDraft(trimmed);
+  const jsonDraft = json ? normalizeAiDraft(json, "JSON") : null;
+  if (jsonDraft) return jsonDraft;
+
+  return parseTableDraft(trimmed) ?? parseFfmpegDraft(trimmed);
+}
+
+function getBatchClipRows(samples: BatchSampleState[]) {
+  const rows: BatchClipRow[] = [];
+  let error: string | null = null;
+
+  samples.forEach((sample, index) => {
+    if (error) return;
+
+    const hasAnyValue = [
+      sample.labelSuffix,
+      sample.knownSpeedKmh,
+      sample.measuredSpeedKmh,
+      sample.timingStartSeconds,
+      sample.timingEndSeconds,
+      sample.notes,
+    ].some((value) => value.trim().length > 0);
+
+    if (!hasAnyValue) return;
+
+    const startSeconds = parseTimeSeconds(sample.timingStartSeconds);
+    const endSeconds = parseTimeSeconds(sample.timingEndSeconds);
+
+    if (startSeconds === null || endSeconds === null) {
+      error = `Row ${index + 1}: 클립을 자르려면 시작/끝 시간을 모두 입력해 주세요.`;
+      return;
+    }
+
+    if (startSeconds < 0 || endSeconds <= startSeconds) {
+      error = `Row ${index + 1}: 끝 시간은 시작 시간보다 커야 합니다.`;
+      return;
+    }
+
+    rows.push({
+      index,
+      sample,
+      startSeconds,
+      endSeconds,
+      knownSpeedKmh: parseFormNumber(sample.knownSpeedKmh),
+    });
+  });
+
+  return { rows, error };
 }
 
 function getSpeedErrorPercent(knownSpeedKmh: number | null | undefined, measuredSpeedKmh: number | null | undefined) {
@@ -304,6 +825,7 @@ function getMetersPerPixel(distanceMeters: string, ballDisplacementPx: string) {
 export default function ReferenceAdminPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const ffmpegRef = useRef<FFmpeg | null>(null);
   const analysisRequestRef = useRef(0);
   const lastAnalyzedSourceUrlRef = useRef("");
   const nextBatchSampleIdRef = useRef(DEFAULT_BATCH_SAMPLE_COUNT);
@@ -313,6 +835,7 @@ export default function ReferenceAdminPage() {
   );
   const [distanceYards, setDistanceYards] = useState("12");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
   const [adminToken, setAdminToken] = useState(() => {
     if (typeof window === "undefined") return "";
     try {
@@ -329,10 +852,21 @@ export default function ReferenceAdminPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isBatchSaving, setIsBatchSaving] = useState(false);
+  const [isCuttingClips, setIsCuttingClips] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [measureMode, setMeasureMode] = useState<MeasureMode>("none");
   const [heightPoints, setHeightPoints] = useState<Point[]>([]);
   const [ballPoints, setBallPoints] = useState<Point[]>([]);
+  const [cutClips, setCutClips] = useState<CutClipResult[]>([]);
+  const [clipCutProgress, setClipCutProgress] = useState<ClipCutProgress>({
+    current: 0,
+    total: 0,
+    label: "",
+  });
+  const [pastedAiDraftText, setPastedAiDraftText] = useState("");
+  const [aiSegmentDraft, setAiSegmentDraft] = useState<AiSegmentDraft | null>(null);
+  const [aiSegmentError, setAiSegmentError] = useState<string | null>(null);
+  const [isAnalyzingVideoSegments, setIsAnalyzingVideoSegments] = useState(false);
   const [linkAnalysis, setLinkAnalysis] = useState<LinkAnalysisDraft | null>(null);
   const [linkAnalysisError, setLinkAnalysisError] = useState<string | null>(null);
   const [isAnalyzingLink, setIsAnalyzingLink] = useState(false);
@@ -356,6 +890,15 @@ export default function ReferenceAdminPage() {
           sample.notes,
         ].some((value) => value.trim().length > 0)
       ).length,
+    [batchSamples]
+  );
+  const timedBatchSampleCount = useMemo(
+    () =>
+      batchSamples.filter((sample) => {
+        const start = parseTimeSeconds(sample.timingStartSeconds);
+        const end = parseTimeSeconds(sample.timingEndSeconds);
+        return start !== null && end !== null && end > start;
+      }).length,
     [batchSamples]
   );
 
@@ -411,6 +954,13 @@ export default function ReferenceAdminPage() {
     }
   }, [adminToken]);
 
+  const releaseCutClips = useCallback(() => {
+    setCutClips((current) => {
+      current.forEach((clip) => URL.revokeObjectURL(clip.url));
+      return [];
+    });
+  }, []);
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       void loadReferences();
@@ -435,6 +985,18 @@ export default function ReferenceAdminPage() {
       if (videoUrl) URL.revokeObjectURL(videoUrl);
     };
   }, [videoUrl]);
+
+  useEffect(() => {
+    return () => {
+      cutClips.forEach((clip) => URL.revokeObjectURL(clip.url));
+    };
+  }, [cutClips]);
+
+  useEffect(() => {
+    return () => {
+      ffmpegRef.current?.terminate();
+    };
+  }, []);
 
   const syncOverlayCanvasSize = useCallback(() => {
     const video = videoRef.current;
@@ -834,6 +1396,12 @@ export default function ReferenceAdminPage() {
 
     const nextUrl = URL.createObjectURL(file);
     setVideoUrl(nextUrl);
+    setVideoFile(file);
+    releaseCutClips();
+    setClipCutProgress({ current: 0, total: 0, label: "" });
+    setAiSegmentDraft(null);
+    setAiSegmentError(null);
+    setPastedAiDraftText("");
     setForm((current) => ({
       ...current,
       label: current.label || file.name.replace(/\.[^.]+$/, ""),
@@ -854,6 +1422,12 @@ export default function ReferenceAdminPage() {
       setVideoUrl(null);
     }
 
+    setVideoFile(null);
+    releaseCutClips();
+    setClipCutProgress({ current: 0, total: 0, label: "" });
+    setAiSegmentDraft(null);
+    setAiSegmentError(null);
+    setPastedAiDraftText("");
     setForm((current) => ({
       ...current,
       sourceUrl: value,
@@ -902,8 +1476,14 @@ export default function ReferenceAdminPage() {
   const resetForm = () => {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideoUrl(null);
+    setVideoFile(null);
     setForm(EMPTY_FORM);
     resetBatchSamples();
+    releaseCutClips();
+    setClipCutProgress({ current: 0, total: 0, label: "" });
+    setAiSegmentDraft(null);
+    setAiSegmentError(null);
+    setPastedAiDraftText("");
     setMeasureMode("none");
     setHeightPoints([]);
     setBallPoints([]);
@@ -1116,6 +1696,227 @@ export default function ReferenceAdminPage() {
       setError("배치 샘플을 저장하지 못했습니다.");
     } finally {
       setIsBatchSaving(false);
+    }
+  };
+
+  const copyGeminiSegmentPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(GEMINI_SEGMENT_PROMPT);
+      setMessage("Gemini 분석 프롬프트를 복사했습니다.");
+      setError(null);
+    } catch {
+      setError("프롬프트를 복사하지 못했습니다.");
+    }
+  };
+
+  const parsePastedAiSegments = () => {
+    const draft = parsePastedAiDraft(pastedAiDraftText);
+
+    if (!draft) {
+      setAiSegmentError("붙여넣은 내용에서 구간을 찾지 못했습니다. JSON, Markdown 표, FFmpeg 명령어 형식을 확인해 주세요.");
+      return;
+    }
+
+    setAiSegmentDraft(draft);
+    setAiSegmentError(null);
+
+    if (draft.distanceCueMeters && !form.knownDistanceMeters.trim()) {
+      updateForm("knownDistanceMeters", draft.distanceCueMeters.toFixed(3));
+    }
+
+    setMessage(`${draft.segments.length}개 붙여넣기 구간 초안을 만들었습니다. 확인 후 적용하세요.`);
+    setError(null);
+  };
+
+  const analyzeVideoSegments = async () => {
+    if (!videoFile) {
+      setError("AI 구간 분석은 로컬로 불러온 영상 파일에서만 가능합니다.");
+      return;
+    }
+
+    setIsAnalyzingVideoSegments(true);
+    setAiSegmentError(null);
+    setAiSegmentDraft(null);
+    setError(null);
+    setMessage(null);
+
+    const context = [
+      form.label ? `Label: ${form.label}` : null,
+      form.sourceUrl ? `Source URL: ${form.sourceUrl}` : null,
+      form.knownDistanceMeters ? `Known distance meters: ${form.knownDistanceMeters}` : null,
+      distanceYards ? `Common distance yards: ${distanceYards}` : null,
+      "Goal: detect candidate kick clips, visible speed overlays, and reviewable timestamps for reference calibration.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    try {
+      const payload = new FormData();
+      payload.append("video", videoFile);
+      payload.append("context", context);
+
+      const res = await fetch("/api/admin/references/analyze-video-segments", {
+        method: "POST",
+        headers: {
+          ...(adminToken ? { "x-admin-token": adminToken } : {}),
+        },
+        body: payload,
+      });
+      const data = (await res.json()) as AiSegmentAnalysisResponse;
+
+      if (!res.ok || !data.draft) {
+        setAiSegmentError(data.error ?? "AI 구간 분석에 실패했습니다.");
+        return;
+      }
+
+      setAiSegmentDraft(data.draft);
+
+      if (data.draft.distanceCueMeters && !form.knownDistanceMeters.trim()) {
+        updateForm("knownDistanceMeters", data.draft.distanceCueMeters.toFixed(3));
+      }
+
+      setMessage(`${data.draft.segments.length}개 AI 구간 초안을 만들었습니다. 확인 후 적용하세요.`);
+    } catch {
+      setAiSegmentError("AI 구간 분석에 실패했습니다.");
+    } finally {
+      setIsAnalyzingVideoSegments(false);
+    }
+  };
+
+  const applyAiSegmentDraft = () => {
+    if (!aiSegmentDraft || aiSegmentDraft.segments.length === 0) {
+      setError("적용할 AI 구간 초안이 없습니다.");
+      return;
+    }
+
+    nextBatchSampleIdRef.current = aiSegmentDraft.segments.length;
+    setBatchSamples(
+      aiSegmentDraft.segments.map((segment, index) => ({
+        id: `ai-${index}-${segment.startSeconds}`,
+        labelSuffix: getAiDraftBatchLabel(segment, index),
+        knownSpeedKmh: segment.visibleSpeedKmh !== null ? segment.visibleSpeedKmh.toFixed(1) : "",
+        measuredSpeedKmh: "",
+        timingStartSeconds: segment.startSeconds.toFixed(3),
+        timingEndSeconds: segment.endSeconds.toFixed(3),
+        notes: [
+          `AI evidence: ${segment.evidence}`,
+          `Confidence: ${Math.round(segment.confidence * 100)}%`,
+          segment.needsReview ? "Needs timestamp review" : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      }))
+    );
+    releaseCutClips();
+    setClipCutProgress({ current: 0, total: 0, label: "" });
+    setMessage("AI 구간 초안을 Manual Segments에 적용했습니다. 저장/커팅 전에 시간을 확인하세요.");
+    setError(null);
+  };
+
+  const cutBatchClips = async () => {
+    if (!videoFile) {
+      setError("클립 생성은 로컬로 불러온 영상 파일에서만 가능합니다.");
+      return;
+    }
+
+    const { rows, error: clipRowsError } = getBatchClipRows(batchSamples);
+
+    if (clipRowsError) {
+      setError(clipRowsError);
+      return;
+    }
+
+    if (rows.length === 0) {
+      setError("자를 배치 구간의 시작/끝 시간을 하나 이상 입력해 주세요.");
+      return;
+    }
+
+    setIsCuttingClips(true);
+    setError(null);
+    setMessage(null);
+    releaseCutClips();
+    setClipCutProgress({ current: 0, total: rows.length, label: "FFmpeg 로드 중" });
+
+    const inputName = getInputFileName(videoFile);
+    const baseLabel = (form.label || linkAnalysis?.suggestedLabel || "Reference").trim();
+
+    try {
+      const [{ FFmpeg }, { fetchFile }] = await Promise.all([
+        import("@ffmpeg/ffmpeg"),
+        import("@ffmpeg/util"),
+      ]);
+
+      let ffmpeg = ffmpegRef.current;
+
+      if (!ffmpeg) {
+        ffmpeg = new FFmpeg();
+        ffmpegRef.current = ffmpeg;
+      }
+
+      if (!ffmpeg.loaded) {
+        await ffmpeg.load();
+      }
+
+      await ffmpeg.writeFile(inputName, await fetchFile(videoFile));
+
+      const nextClips: CutClipResult[] = [];
+
+      for (const [clipIndex, row] of rows.entries()) {
+        const outputName = getCutOutputName(baseLabel, row);
+        const durationSeconds = row.endSeconds - row.startSeconds;
+
+        setClipCutProgress({
+          current: clipIndex + 1,
+          total: rows.length,
+          label: row.sample.labelSuffix || `Clip ${row.index + 1}`,
+        });
+
+        const exitCode = await ffmpeg.exec([
+          "-ss",
+          formatTimestamp(row.startSeconds),
+          "-i",
+          inputName,
+          "-t",
+          durationSeconds.toFixed(3),
+          "-c",
+          "copy",
+          "-avoid_negative_ts",
+          "make_zero",
+          outputName,
+        ]);
+
+        if (exitCode !== 0) {
+          throw new Error(`${outputName} 생성에 실패했습니다.`);
+        }
+
+        const data = await ffmpeg.readFile(outputName);
+
+        if (!(data instanceof Uint8Array)) {
+          throw new Error(`${outputName} 결과를 읽지 못했습니다.`);
+        }
+
+        const blob = new Blob([new Uint8Array(data)], { type: "video/mp4" });
+        nextClips.push({
+          id: `${row.index}-${row.startSeconds}-${row.endSeconds}`,
+          name: outputName,
+          url: URL.createObjectURL(blob),
+          sizeBytes: blob.size,
+          startSeconds: row.startSeconds,
+          endSeconds: row.endSeconds,
+        });
+
+        await ffmpeg.deleteFile(outputName).catch(() => undefined);
+      }
+
+      await ffmpeg.deleteFile(inputName).catch(() => undefined);
+
+      setCutClips(nextClips);
+      setMessage(`${nextClips.length}개 클립을 생성했습니다. 아래 다운로드 링크를 사용하세요.`);
+    } catch (cutError) {
+      setError(cutError instanceof Error ? cutError.message : "클립 생성에 실패했습니다.");
+      setClipCutProgress({ current: 0, total: rows.length, label: "" });
+    } finally {
+      setIsCuttingClips(false);
     }
   };
 
@@ -1545,7 +2346,7 @@ export default function ReferenceAdminPage() {
                       <div className="mt-1 text-sm font-bold text-white">Same source batch</div>
                     </div>
                     <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1 font-mono text-[10px] tracking-widest text-gray-400">
-                      {filledBatchSampleCount} READY
+                      {filledBatchSampleCount} READY · {timedBatchSampleCount} CUT
                     </span>
                   </div>
 
@@ -1582,6 +2383,146 @@ export default function ReferenceAdminPage() {
                     >
                       Apply Yards
                     </button>
+                  </div>
+
+                  <div className="mb-4 rounded-xl border border-[var(--color-neon-green)]/25 bg-[var(--color-neon-green)]/5 p-3">
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-mono text-[10px] tracking-widest text-[var(--color-neon-green)]">
+                          AI SEGMENT DRAFT
+                        </div>
+                        <div className="mt-1 text-sm font-bold text-white">Detect reviewable kick clips</div>
+                      </div>
+                      <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1 font-mono text-[10px] tracking-widest text-gray-400">
+                        {aiSegmentDraft?.segments.length ?? 0} FOUND
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={analyzeVideoSegments}
+                      disabled={!videoFile || isAnalyzingVideoSegments || isSaving || isBatchSaving || isCuttingClips}
+                      className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-neon-green)] px-3 py-2 text-sm font-black text-black transition-transform hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {isAnalyzingVideoSegments ? (
+                        <Loader2 className="animate-spin" size={16} />
+                      ) : (
+                        <Activity size={16} />
+                      )}
+                      Analyze Video
+                    </button>
+
+                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        onClick={copyGeminiSegmentPrompt}
+                        className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10"
+                      >
+                        <Copy size={14} />
+                        Copy Prompt
+                      </button>
+                      <button
+                        type="button"
+                        onClick={parsePastedAiSegments}
+                        disabled={!pastedAiDraftText.trim()}
+                        className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <CheckCircle2 size={14} />
+                        Parse Paste
+                      </button>
+                    </div>
+
+                    <textarea
+                      value={pastedAiDraftText}
+                      onChange={(event) => setPastedAiDraftText(event.target.value)}
+                      rows={5}
+                      placeholder="Paste Gemini JSON, Markdown table, or FFmpeg commands"
+                      className="mt-3 w-full resize-y rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs leading-relaxed text-gray-200 outline-none placeholder:text-gray-600 focus:border-[var(--color-neon-green)]"
+                    />
+
+                    {!videoFile && (
+                      <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3 text-xs leading-relaxed text-gray-400">
+                        로컬 영상을 불러오면 API 분석도 사용할 수 있습니다.
+                      </div>
+                    )}
+
+                    {aiSegmentError && (
+                      <div className="mt-3 rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-100">
+                        {aiSegmentError}
+                      </div>
+                    )}
+
+                    {aiSegmentDraft && (
+                      <div className="mt-3 space-y-3">
+                        <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs leading-relaxed text-gray-300">
+                          {aiSegmentDraft.summary}
+                          {aiSegmentDraft.distanceCueMeters !== null && (
+                            <div className="mt-2 font-mono text-[10px] tracking-widest text-gray-500">
+                              DISTANCE CUE {formatNumber(aiSegmentDraft.distanceCueMeters, 2)} M
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                          {aiSegmentDraft.segments.map((segment, index) => (
+                            <div key={`${segment.startSeconds}-${segment.endSeconds}-${index}`} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                              <div className="mb-2 flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="truncate text-sm font-bold text-white">
+                                    {getAiDraftBatchLabel(segment, index)}
+                                  </div>
+                                  <div className="mt-1 font-mono text-[10px] tracking-widest text-gray-500">
+                                    {formatTimestamp(segment.startSeconds)} - {formatTimestamp(segment.endSeconds)}
+                                  </div>
+                                </div>
+                                <span
+                                  className={`shrink-0 rounded-full border px-2 py-1 font-mono text-[10px] tracking-widest ${
+                                    segment.needsReview
+                                      ? "border-amber-300/30 text-amber-100"
+                                      : "border-[var(--color-neon-green)]/40 text-[var(--color-neon-green)]"
+                                  }`}
+                                >
+                                  {Math.round(segment.confidence * 100)}%
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
+                                <div className="rounded bg-white/5 p-2">
+                                  <div className="mb-1 font-mono text-[10px] tracking-widest text-gray-500">
+                                    SPEED
+                                  </div>
+                                  {getAiSpeedLabel(segment)}
+                                </div>
+                                <div className="rounded bg-white/5 p-2">
+                                  <div className="mb-1 font-mono text-[10px] tracking-widest text-gray-500">
+                                    ACTUAL
+                                  </div>
+                                  {formatNumber(segment.visibleSpeedKmh)} km/h
+                                </div>
+                              </div>
+
+                              <p className="mt-2 text-xs leading-relaxed text-gray-500">{segment.evidence}</p>
+                            </div>
+                          ))}
+                        </div>
+
+                        {aiSegmentDraft.warnings.length > 0 && (
+                          <div className="space-y-1 text-xs leading-relaxed text-amber-100/80">
+                            {aiSegmentDraft.warnings.map((warning) => (
+                              <div key={warning}>- {warning}</div>
+                            ))}
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={applyAiSegmentDraft}
+                          className="w-full rounded-lg border border-white/15 px-3 py-2 text-sm font-bold transition-colors hover:bg-white/10"
+                        >
+                          Apply Draft to Rows
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   <div className="mb-4 grid grid-cols-2 gap-2">
@@ -1718,7 +2659,7 @@ export default function ReferenceAdminPage() {
                     })}
                   </div>
 
-                  <div className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-2">
+                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)]">
                     <button
                       type="button"
                       onClick={resetBatchSamples}
@@ -1735,7 +2676,70 @@ export default function ReferenceAdminPage() {
                       {isBatchSaving ? <Loader2 className="animate-spin" size={16} /> : <Activity size={16} />}
                       Save Batch
                     </button>
+                    <button
+                      type="button"
+                      onClick={cutBatchClips}
+                      disabled={!videoFile || timedBatchSampleCount === 0 || isCuttingClips || isBatchSaving || isSaving}
+                      className="flex items-center justify-center gap-2 rounded-lg border border-[var(--color-neon-green)]/40 px-3 py-2 text-sm font-black text-[var(--color-neon-green)] transition-colors hover:bg-[var(--color-neon-green)]/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {isCuttingClips ? <Loader2 className="animate-spin" size={16} /> : <Scissors size={16} />}
+                      Cut Clips
+                    </button>
                   </div>
+
+                  {(isCuttingClips || cutClips.length > 0) && (
+                    <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <div className="font-mono text-[10px] tracking-widest text-gray-500">CUT OUTPUTS</div>
+                        <div className="text-xs text-gray-400">
+                          {isCuttingClips
+                            ? `${clipCutProgress.current}/${clipCutProgress.total}`
+                            : `${cutClips.length} files`}
+                        </div>
+                      </div>
+
+                      {isCuttingClips && (
+                        <div>
+                          <div className="mb-2 truncate text-xs text-gray-300">
+                            {clipCutProgress.label || "Processing"}
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                            <div
+                              className="h-full bg-[var(--color-neon-green)] transition-all"
+                              style={{
+                                width:
+                                  clipCutProgress.total > 0
+                                    ? `${Math.round((clipCutProgress.current / clipCutProgress.total) * 100)}%`
+                                    : "8%",
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {cutClips.length > 0 && (
+                        <div className="mt-3 space-y-2">
+                          {cutClips.map((clip) => (
+                            <a
+                              key={clip.id}
+                              href={clip.url}
+                              download={clip.name}
+                              className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs transition-colors hover:bg-white/10"
+                            >
+                              <span className="min-w-0">
+                                <span className="block truncate font-bold text-white">{clip.name}</span>
+                                <span className="mt-1 block font-mono text-[10px] text-gray-500">
+                                  {formatTimestamp(clip.startSeconds)} - {formatTimestamp(clip.endSeconds)} ·{" "}
+                                  {formatFileSize(clip.sizeBytes)}
+                                </span>
+                              </span>
+                              <Download size={16} className="shrink-0 text-[var(--color-neon-green)]" />
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
