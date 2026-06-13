@@ -373,11 +373,18 @@ function getAiSpeedLabel(segment: AiSegmentDraftRow) {
 }
 
 function getAiDraftBatchLabel(segment: AiSegmentDraftRow, index: number) {
-  const parts = [segment.player, segment.kickType, getAiSpeedLabel(segment)]
+  const speedLabel = getAiSpeedLabel(segment);
+  const identityParts = [segment.player, segment.kickType]
     .filter((part) => part && part !== "speed check needed")
     .map((part) => String(part).trim());
 
-  return parts.length > 0 ? parts.join(" ") : segment.label || `Clip ${index + 1}`;
+  if (identityParts.length > 0) {
+    return [...identityParts, speedLabel !== "speed check needed" ? speedLabel : null].filter(Boolean).join(" ");
+  }
+
+  if (segment.label) return segment.label;
+
+  return speedLabel !== "speed check needed" ? speedLabel : `Clip ${index + 1}`;
 }
 
 function parseUnknownNumber(value: unknown) {
@@ -433,7 +440,11 @@ function parseSpeedCell(value: unknown) {
     return { visibleSpeedValue: null, visibleSpeedUnit: null, visibleSpeedKmh: null };
   }
 
-  const match = value.match(/(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh|kph|m\/s|mps|ms)?/i);
+  const unitMatches = Array.from(value.matchAll(/(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh|kph|m\/s|mps|ms)\b/gi));
+  const match =
+    unitMatches.length > 0
+      ? unitMatches[unitMatches.length - 1]
+      : value.match(/(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh|kph|m\/s|mps|ms)?/i);
   if (!match) return { visibleSpeedValue: null, visibleSpeedUnit: null, visibleSpeedKmh: null };
 
   const visibleSpeedValue = parseUnknownNumber(match[1]);
