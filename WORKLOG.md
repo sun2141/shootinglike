@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-06-14 (5) · Claude — cut 워커 import: ESM 소스 인라인으로 재수정
+
+(4)의 self-host 가 실패: 같은 `Cannot find module 'blob:...'` 재발.
+
+### 추가 진단 (확정)
+- 배포된 vendored UMD 워커(`814.ffmpeg.js`) 내부를 디스어셈블해 보니 코어 로딩이
+  `self.createFFmpegCore=(await r(454)(o)).default` — 즉 **@ffmpeg 가 배포한 UMD 워커
+  자체가 webpack 빌드로 동적 import 가 `__webpack_require__`(r) 로 재작성된 채 깨져 있음**
+  ("Cannot find module" 문자열도 번들에 박혀 있음). 그래서 UMD 워커를 self-host 해도 동일.
+- @ffmpeg 워커는 `import(/* @vite-ignore */ coreURL)` 를 쓰는데 **webpack 용 무시 주석이
+  없어** 어떤 webpack(@ffmpeg 빌드든 Next 빌드든)을 거치면 깨진다.
+
+### 수정 (`scripts/setup-ffmpeg.mjs`, `public/ffmpeg/worker.js`)
+- setup 스크립트가 **ESM 워커 *소스*** (`dist/esm/worker.js`, native `import()`)를
+  `const.js`/`errors.js` 까지 인라인해 단일 정적 ESM 모듈로 생성. 정적 파일은 어떤 번들러도
+  거치지 않으므로 `import(coreURL)` 가 네이티브로 동작 → blob 코어 정상 로드.
+- 이 파일을 classWorkerURL 로 넘김(코드는 (4)에서 이미 적용됨). `node --check` 통과.
+
+### 요청
+- 배포 후 **시크릿 창**(또는 SW unregister)에서 cut 재시도.
+- 그래도 실패 시 화면의 실제 ffmpeg 문구 공유.
+
+---
+
 ## 2026-06-14 (4) · Claude — cut 진짜 원인 해결: webpack 워커 import 깨짐
 
 실제 에러(사용자 보고): **`클립 생성 실패: Error: Cannot find module 'blob:https://...'`**
