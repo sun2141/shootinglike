@@ -221,7 +221,7 @@ const REFERENCE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 const REMOTE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm)(\?.*)?$/i;
 const FFMPEG_CORE_VERSION = "0.12.9";
 const FFMPEG_CORE_BASE_URL = `https://unpkg.com/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm`;
-const FFMPEG_ASSET_TIMEOUT_MS = 30000;
+const FFMPEG_ASSET_TIMEOUT_MS = 60000;
 const FFMPEG_LOAD_TIMEOUT_MS = 180000;
 const FFMPEG_LOAD_TIMEOUT_MESSAGE =
   "FFmpeg 초기화가 시간 안에 끝나지 않았습니다. 네트워크 상태가 좋을 때 새로고침한 뒤 다시 시도해 주세요.";
@@ -1986,6 +1986,11 @@ export default function ReferenceAdminPage() {
           label: row.sample.labelSuffix || `Clip ${row.index + 1}`,
         });
 
+        // 입력 허용 형식이 mp4/m4v/mov/webm/avi/mkv 이므로 스트림 복사(-c copy)로
+        // .mp4 컨테이너에 remux 하면 VP9/Opus(webm) 등 비호환 코덱에서 실패하거나
+        // 깨진 클립이 만들어진다. 또한 input -ss + copy 는 키프레임 정렬 때문에
+        // 시작 지점이 어긋나고 클립 앞부분이 손상된다.
+        // 어떤 입력이든 프레임 정확하고 어디서나 재생되는 H.264/AAC mp4 로 재인코딩한다.
         const exitCode = await ffmpeg.exec([
           "-ss",
           formatTimestamp(row.startSeconds),
@@ -1993,10 +1998,20 @@ export default function ReferenceAdminPage() {
           inputName,
           "-t",
           durationSeconds.toFixed(3),
-          "-c",
-          "copy",
-          "-avoid_negative_ts",
-          "make_zero",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "veryfast",
+          "-crf",
+          "23",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          "-movflags",
+          "+faststart",
           outputName,
         ]);
 
