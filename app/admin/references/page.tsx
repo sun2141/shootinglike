@@ -221,6 +221,9 @@ const REFERENCE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 const REMOTE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm)(\?.*)?$/i;
 const FFMPEG_CORE_VERSION = "0.12.9";
 const FFMPEG_CORE_BASE_URL = `https://unpkg.com/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm`;
+// webpack 이 워커 내부 동적 import 를 깨뜨리는 문제를 피하려고, self-contained UMD 워커
+// 번들을 동일 출처(public/ffmpeg/worker.js)에서 받아 classWorkerURL 로 넘긴다. (scripts/setup-ffmpeg.mjs)
+const FFMPEG_CLASS_WORKER_URL = "/ffmpeg/worker.js";
 const FFMPEG_ASSET_TIMEOUT_MS = 60000;
 const FFMPEG_LOAD_TIMEOUT_MS = 180000;
 const FFMPEG_LOAD_TIMEOUT_MESSAGE =
@@ -427,10 +430,18 @@ async function loadFfmpegCore(
     );
     objectUrls.push(wasmURL);
 
+    setProgressLabel("FFmpeg 워커 준비 중");
+    const classWorkerURL = await fetchAssetAsObjectUrl(
+      FFMPEG_CLASS_WORKER_URL,
+      "text/javascript",
+      "FFmpeg 워커 파일을 불러오지 못했습니다. 새로고침 후 다시 시도해 주세요."
+    );
+    objectUrls.push(classWorkerURL);
+
     setProgressLabel("FFmpeg 초기화 중");
 
     await withTimeout(
-      ffmpeg.load({ coreURL, wasmURL }),
+      ffmpeg.load({ classWorkerURL, coreURL, wasmURL }),
       FFMPEG_LOAD_TIMEOUT_MS,
       FFMPEG_LOAD_TIMEOUT_MESSAGE
     );

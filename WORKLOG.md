@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-06-14 (4) · Claude — cut 진짜 원인 해결: webpack 워커 import 깨짐
+
+실제 에러(사용자 보고): **`클립 생성 실패: Error: Cannot find module 'blob:https://...'`**
+
+### 진단 (확정)
+- `@ffmpeg/ffmpeg` 의 워커는 코어를 `import(coreURL)`(coreURL = blob)로 로드한다(`dist/esm/worker.js`).
+- 그런데 `new Worker(new URL('./worker.js', import.meta.url))` 로 워커를 만들면 **Next(webpack)가 워커를 번들하면서 내부 동적 `import()` 를 재작성**한다. 런타임에 blob 코어 모듈을 webpack 모듈맵에서 못 찾아 `Cannot find module 'blob:...'` 로 실패. (앞선 COOP/COEP 제거로 로딩 자체는 시작되어 이 단계까지 도달하게 된 것.)
+
+### 수정 (`app/admin/references/page.tsx`, `scripts/setup-ffmpeg.mjs`, `package.json`, `eslint.config.mjs`, `public/ffmpeg/worker.js`)
+- **self-contained UMD 워커 번들을 classWorkerURL 로 사용**: `@ffmpeg/ffmpeg/dist/umd/814.ffmpeg.js` 를 `public/ffmpeg/worker.js` 로 복사(vendored)하고, 동일 출처에서 blob 으로 받아 `ffmpeg.load({ classWorkerURL, coreURL, wasmURL })` 에 전달. webpack 을 거치지 않으므로 워커의 `import(coreURL)` 가 네이티브로 동작 → blob 코어 정상 로드.
+- `scripts/setup-ffmpeg.mjs`: dist/umd 의 워커 번들(파일명 버전마다 다름)을 자동 탐색해 `public/ffmpeg/worker.js` 로 복사. 실패해도 빌드 안 막음(커밋된 사본 사용).
+- `package.json`: `postinstall` 에 `node scripts/setup-ffmpeg.mjs` 추가(버전 업 시 자동 갱신).
+- `eslint.config.mjs`: `public/ffmpeg/**`(벤더 번들) lint 제외.
+
+### 검증/요청
+- `npm run lint` 통과. 런타임은 배포 후 확인 필요 → **하드 리로드/SW unregister 후** cut 재시도.
+- 코어 자체(unpkg ESM)는 그대로 두되, 워커만 self-host. 코어까지 self-host 하려면 별도 작업(앞 항목 참고).
+
+---
+
 ## 2026-06-14 (3) · Claude — cut "클립 생성에 실패했습니다" 후속
 
 진전: COOP/COEP 제거로 FFmpeg 로딩은 성공(초기화 타임아웃 사라짐). 이제 실제 cut/인코딩 단계에서 실패.

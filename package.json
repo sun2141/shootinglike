@@ -7,7 +7,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate && node scripts/setup-ffmpeg.mjs"
   },
   "dependencies": {
     "@ffmpeg/ffmpeg": "^0.12.15",

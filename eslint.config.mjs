@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     "public/sw.js",
     "public/sw*.js",
+    // Vendored @ffmpeg UMD worker bundle copied by scripts/setup-ffmpeg.mjs
+    "public/ffmpeg/**",
   ]),
 ]);
 
