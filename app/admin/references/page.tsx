@@ -219,6 +219,10 @@ const YARD_TO_METER = 0.9144;
 const DEFAULT_BATCH_SAMPLE_COUNT = 5;
 const REFERENCE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 const REMOTE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm)(\?.*)?$/i;
+const FFMPEG_CORE_VERSION = "0.12.9";
+const FFMPEG_CORE_BASE_URL = `https://unpkg.com/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm`;
+const FFMPEG_ASSET_TIMEOUT_MS = 30000;
+const FFMPEG_LOAD_TIMEOUT_MS = 45000;
 const GEMINI_SEGMENT_PROMPT = `이 영상은 축구 슈팅/페널티킥/프리킥 분석용 레퍼런스 데이터베이스를 만들기 위한 원본 영상입니다.
 
 목표:
@@ -351,6 +355,90 @@ function sanitizeFilePart(value: string, fallback: string) {
 function getInputFileName(file: File) {
   const extension = file.name.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase() ?? ".mp4";
   return `input${extension}`;
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: () => void
+): Promise<T> {
+  let timeoutId: number | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(message));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+  });
+}
+
+async function fetchAssetAsObjectUrl(url: string, mimeType: string, timeoutMessage: string) {
+  const abortController = new AbortController();
+  const timeoutId = window.setTimeout(() => abortController.abort(), FFMPEG_ASSET_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      cache: "force-cache",
+      signal: abortController.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`${timeoutMessage} (${response.status})`);
+    }
+
+    const blob = new Blob([await response.arrayBuffer()], { type: mimeType });
+    return URL.createObjectURL(blob);
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      throw new Error(timeoutMessage);
+    }
+
+    throw error instanceof Error ? error : new Error(timeoutMessage);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function loadFfmpegCore(
+  ffmpeg: FFmpeg,
+  setProgressLabel: (label: string) => void
+) {
+  const objectUrls: string[] = [];
+
+  try {
+    setProgressLabel("FFmpeg core 준비 중");
+    const coreURL = await fetchAssetAsObjectUrl(
+      `${FFMPEG_CORE_BASE_URL}/ffmpeg-core.js`,
+      "text/javascript",
+      "FFmpeg core 파일을 불러오지 못했습니다. 네트워크 연결을 확인한 뒤 다시 시도해 주세요."
+    );
+    objectUrls.push(coreURL);
+
+    setProgressLabel("FFmpeg WASM 준비 중");
+    const wasmURL = await fetchAssetAsObjectUrl(
+      `${FFMPEG_CORE_BASE_URL}/ffmpeg-core.wasm`,
+      "application/wasm",
+      "FFmpeg WASM 파일을 불러오지 못했습니다. 네트워크 연결을 확인한 뒤 다시 시도해 주세요."
+    );
+    objectUrls.push(wasmURL);
+
+    const abortController = new AbortController();
+    setProgressLabel("FFmpeg 초기화 중");
+
+    await withTimeout(
+      ffmpeg.load({ coreURL, wasmURL }, { signal: abortController.signal }),
+      FFMPEG_LOAD_TIMEOUT_MS,
+      "FFmpeg 초기화가 시간 안에 끝나지 않았습니다. 브라우저를 새로고침한 뒤 다시 시도해 주세요.",
+      () => abortController.abort()
+    );
+  } finally {
+    objectUrls.forEach((url) => URL.revokeObjectURL(url));
+  }
 }
 
 function getCutOutputName(baseLabel: string, row: BatchClipRow) {
@@ -1864,9 +1952,12 @@ export default function ReferenceAdminPage() {
       }
 
       if (!ffmpeg.loaded) {
-        await ffmpeg.load();
+        await loadFfmpegCore(ffmpeg, (label) => {
+          setClipCutProgress({ current: 0, total: rows.length, label });
+        });
       }
 
+      setClipCutProgress({ current: 0, total: rows.length, label: "영상 파일 준비 중" });
       await ffmpeg.writeFile(inputName, await fetchFile(videoFile));
 
       const nextClips: CutClipResult[] = [];
@@ -1923,6 +2014,8 @@ export default function ReferenceAdminPage() {
       setCutClips(nextClips);
       setMessage(`${nextClips.length}개 클립을 생성했습니다. 아래 다운로드 링크를 사용하세요.`);
     } catch (cutError) {
+      ffmpegRef.current?.terminate();
+      ffmpegRef.current = null;
       setError(cutError instanceof Error ? cutError.message : "클립 생성에 실패했습니다.");
       setClipCutProgress({ current: 0, total: rows.length, label: "" });
     } finally {
