@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-06-14 (3) · Claude — cut "클립 생성에 실패했습니다" 후속
+
+진전: COOP/COEP 제거로 FFmpeg 로딩은 성공(초기화 타임아웃 사라짐). 이제 실제 cut/인코딩 단계에서 실패.
+
+### 진단
+- 메시지 "클립 생성에 실패했습니다"는 `getClipCutErrorMessage`의 **fallback**(비-Error throw 시). `@ffmpeg/ffmpeg` worker는 내부 에러를 `e.toString()` **문자열**로 reject(`node_modules/@ffmpeg/ffmpeg/dist/esm/worker.js`)하는데, 기존 코드가 `instanceof Error`가 아니라며 그 문자열(=진짜 ffmpeg 에러)을 버리고 있었음.
+- 추정 원인: 매 클립을 `libx264`로 **강제 재인코딩**하던 변경 때문에 실제 고해상도 footage에서 wasm 메모리 초과/abort 가능성. (확정은 아래 에러 노출로 확인 예정.)
+
+### 수정 (`app/admin/references/page.tsx`)
+- **실제 에러 노출**: `getClipCutErrorMessage`가 문자열/객체 reject 값을 그대로 표면화 → 화면에 "클립 생성 실패: <실제 ffmpeg 메시지>" 표시.
+- **copy 우선 + 재인코딩 fallback**(`cutClipData` 헬퍼 신설): 1) 먼저 `-c copy`로 가볍게 시도(H.264 mp4/mov는 빠르고 메모리 거의 안 씀) → 2) 실패/빈 결과면 `libx264 -preset ultrafast`로 재인코딩(webm/VP9·mkv·avi 대응). 매 클립 강제 재인코딩 제거로 OOM 회피.
+
+### 한계/요청
+- 브라우저 런타임 검증 불가(샌드박스). 배포 후 **하드 리로드/SW unregister** 뒤 재시도 필요.
+- 그래도 실패하면 이제 화면에 **실제 ffmpeg 에러 문자열**이 보이므로, 그 문구를 공유해주면 정확히 특정 가능.
+
+---
+
 ## 2026-06-14 (2) · Claude — cut clip "FFmpeg 초기화 타임아웃" 진단/수정
 
 증상(사용자 보고): cut 시 클립이 만들어지지 않고 **"FFmpeg 초기화가 시간 안에 끝나지 않았습니다. 네트워크 상태가 좋을 때 새로고침한 뒤 다시 시도해 주세요."** 발생.

@@ -444,15 +444,95 @@ function getClipCutErrorMessage(error: unknown) {
     return FFMPEG_LOAD_TIMEOUT_MESSAGE;
   }
 
+  // @ffmpeg/ffmpeg worker는 내부 에러를 Error가 아니라 e.toString() 문자열로 reject한다.
+  // 문자열/객체를 그대로 노출해야 실제 원인(OOM, 인코더 없음, ErrnoError 등)을 알 수 있다.
+  let text: string;
   if (error instanceof Error) {
-    if (/Message # \d+ was aborted/.test(error.message)) {
-      return FFMPEG_LOAD_TIMEOUT_MESSAGE;
+    text = error.message;
+  } else if (typeof error === "string") {
+    text = error;
+  } else {
+    try {
+      text = JSON.stringify(error);
+    } catch {
+      text = String(error);
     }
-
-    return error.message;
   }
 
-  return "클립 생성에 실패했습니다.";
+  if (/Message # \d+ was aborted/.test(text)) {
+    return FFMPEG_LOAD_TIMEOUT_MESSAGE;
+  }
+
+  return text && text !== "{}" ? `클립 생성 실패: ${text}` : "클립 생성에 실패했습니다.";
+}
+
+async function cutClipData(
+  ffmpeg: FFmpeg,
+  inputName: string,
+  outputName: string,
+  startSeconds: number,
+  durationSeconds: number
+): Promise<Uint8Array> {
+  const ss = formatTimestamp(startSeconds);
+  const t = durationSeconds.toFixed(3);
+
+  // 1) 가벼운 스트림 복사 우선. H.264 mp4/mov 처럼 호환되는 입력은 재인코딩 없이
+  //    빠르게 잘리고, wasm 메모리도 거의 쓰지 않는다(고해상도 재인코딩 시의 OOM/abort 회피).
+  let exitCode = await ffmpeg.exec([
+    "-ss",
+    ss,
+    "-i",
+    inputName,
+    "-t",
+    t,
+    "-c",
+    "copy",
+    "-avoid_negative_ts",
+    "make_zero",
+    outputName,
+  ]);
+
+  if (exitCode === 0) {
+    const copied = await ffmpeg.readFile(outputName);
+    if (copied instanceof Uint8Array && copied.length > 0) return copied;
+  }
+
+  // 2) 복사가 실패하거나(웹m/VP9·mkv·avi 등 mp4 비호환) 결과가 비면 H.264/AAC 로 재인코딩.
+  //    ultrafast 로 메모리/시간 부담을 줄인다.
+  await ffmpeg.deleteFile(outputName).catch(() => undefined);
+  exitCode = await ffmpeg.exec([
+    "-ss",
+    ss,
+    "-i",
+    inputName,
+    "-t",
+    t,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-crf",
+    "23",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    "-movflags",
+    "+faststart",
+    outputName,
+  ]);
+
+  if (exitCode !== 0) {
+    throw new Error(`ffmpeg 종료 코드 ${exitCode} (복사/재인코딩 모두 실패)`);
+  }
+
+  const data = await ffmpeg.readFile(outputName);
+  if (!(data instanceof Uint8Array) || data.length === 0) {
+    throw new Error("인코딩 결과 파일이 비어 있습니다.");
+  }
+  return data;
 }
 
 function getCutOutputName(baseLabel: string, row: BatchClipRow) {
@@ -1986,44 +2066,13 @@ export default function ReferenceAdminPage() {
           label: row.sample.labelSuffix || `Clip ${row.index + 1}`,
         });
 
-        // 입력 허용 형식이 mp4/m4v/mov/webm/avi/mkv 이므로 스트림 복사(-c copy)로
-        // .mp4 컨테이너에 remux 하면 VP9/Opus(webm) 등 비호환 코덱에서 실패하거나
-        // 깨진 클립이 만들어진다. 또한 input -ss + copy 는 키프레임 정렬 때문에
-        // 시작 지점이 어긋나고 클립 앞부분이 손상된다.
-        // 어떤 입력이든 프레임 정확하고 어디서나 재생되는 H.264/AAC mp4 로 재인코딩한다.
-        const exitCode = await ffmpeg.exec([
-          "-ss",
-          formatTimestamp(row.startSeconds),
-          "-i",
+        const data = await cutClipData(
+          ffmpeg,
           inputName,
-          "-t",
-          durationSeconds.toFixed(3),
-          "-c:v",
-          "libx264",
-          "-preset",
-          "veryfast",
-          "-crf",
-          "23",
-          "-pix_fmt",
-          "yuv420p",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "128k",
-          "-movflags",
-          "+faststart",
           outputName,
-        ]);
-
-        if (exitCode !== 0) {
-          throw new Error(`${outputName} 생성에 실패했습니다.`);
-        }
-
-        const data = await ffmpeg.readFile(outputName);
-
-        if (!(data instanceof Uint8Array)) {
-          throw new Error(`${outputName} 결과를 읽지 못했습니다.`);
-        }
+          row.startSeconds,
+          durationSeconds
+        );
 
         const blob = new Blob([new Uint8Array(data)], { type: "video/mp4" });
         nextClips.push({
