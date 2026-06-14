@@ -728,7 +728,6 @@ function getBatchClipRows(samples: BatchSampleState[]) {
     if (error) return;
 
     const hasAnyValue = [
-      sample.labelSuffix,
       sample.knownSpeedKmh,
       sample.measuredSpeedKmh,
       sample.timingStartSeconds,
