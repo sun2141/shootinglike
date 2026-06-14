@@ -222,7 +222,9 @@ const REMOTE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm)(\?.*)?$/i;
 const FFMPEG_CORE_VERSION = "0.12.9";
 const FFMPEG_CORE_BASE_URL = `https://unpkg.com/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm`;
 const FFMPEG_ASSET_TIMEOUT_MS = 30000;
-const FFMPEG_LOAD_TIMEOUT_MS = 45000;
+const FFMPEG_LOAD_TIMEOUT_MS = 180000;
+const FFMPEG_LOAD_TIMEOUT_MESSAGE =
+  "FFmpeg 초기화가 시간 안에 끝나지 않았습니다. 네트워크 상태가 좋을 때 새로고침한 뒤 다시 시도해 주세요.";
 const GEMINI_SEGMENT_PROMPT = `이 영상은 축구 슈팅/페널티킥/프리킥 분석용 레퍼런스 데이터베이스를 만들기 위한 원본 영상입니다.
 
 목표:
@@ -360,14 +362,12 @@ function getInputFileName(file: File) {
 function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  message: string,
-  onTimeout?: () => void
+  message: string
 ): Promise<T> {
   let timeoutId: number | null = null;
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = window.setTimeout(() => {
-      onTimeout?.();
       reject(new Error(message));
     }, timeoutMs);
   });
@@ -427,18 +427,32 @@ async function loadFfmpegCore(
     );
     objectUrls.push(wasmURL);
 
-    const abortController = new AbortController();
     setProgressLabel("FFmpeg 초기화 중");
 
     await withTimeout(
-      ffmpeg.load({ coreURL, wasmURL }, { signal: abortController.signal }),
+      ffmpeg.load({ coreURL, wasmURL }),
       FFMPEG_LOAD_TIMEOUT_MS,
-      "FFmpeg 초기화가 시간 안에 끝나지 않았습니다. 브라우저를 새로고침한 뒤 다시 시도해 주세요.",
-      () => abortController.abort()
+      FFMPEG_LOAD_TIMEOUT_MESSAGE
     );
   } finally {
     objectUrls.forEach((url) => URL.revokeObjectURL(url));
   }
+}
+
+function getClipCutErrorMessage(error: unknown) {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return FFMPEG_LOAD_TIMEOUT_MESSAGE;
+  }
+
+  if (error instanceof Error) {
+    if (/Message # \d+ was aborted/.test(error.message)) {
+      return FFMPEG_LOAD_TIMEOUT_MESSAGE;
+    }
+
+    return error.message;
+  }
+
+  return "클립 생성에 실패했습니다.";
 }
 
 function getCutOutputName(baseLabel: string, row: BatchClipRow) {
@@ -2016,7 +2030,7 @@ export default function ReferenceAdminPage() {
     } catch (cutError) {
       ffmpegRef.current?.terminate();
       ffmpegRef.current = null;
-      setError(cutError instanceof Error ? cutError.message : "클립 생성에 실패했습니다.");
+      setError(getClipCutErrorMessage(cutError));
       setClipCutProgress({ current: 0, total: rows.length, label: "" });
     } finally {
       setIsCuttingClips(false);
