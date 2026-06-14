@@ -20,6 +20,7 @@
 
 ### 검증/한계
 - `npm run lint` 통과. 단, 브라우저 런타임 검증은 이 환경에서 불가 → **사용자 macOS에서 dev/build 후 cut 재시도 필요**. service worker가 이전 헤더/청크를 캐시했을 수 있으니 **하드 리로드 또는 SW unregister 후** 테스트 권장.
+- **커밋 완료**: `26df3e5 fix: resolve reference cut-clip FFmpeg load timeout` (로컬). 샌드박스에 GitHub 인증이 없어 **push는 맥에서 `git push origin main`** 필요 → push 시 Vercel 자동 배포. 배포 후 SW 캐시 때문에 하드 리로드/Service Worker unregister 후 cut 재확인 권장.
 - 여전히 실패하면 다음 durable 픽스 권장(미적용, 논의 필요): **ffmpeg 코어 self-host** — `@ffmpeg/core@0.12.9`를 의존성에 추가하고 `dist/esm`의 `ffmpeg-core.js`/`.wasm`을 `public/ffmpeg/`로 복사해 동일 출처에서 로드(unpkg 의존 제거). 단, Serwist precache에서 해당 30MB 파일 제외 설정 필요.
 
 ---
