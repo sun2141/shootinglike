@@ -32,12 +32,12 @@ import html2canvas from "html2canvas";
 const MAX_CLIENT_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
 const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 300;
 const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 220;
-const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 360;
+const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 650;
 const MAX_TRAJECTORY_POINTS = 90;
 const VIDEO_READY_TIMEOUT_MS = 12000;
-const ANALYSIS_SAMPLE_FPS = 12;
+const ANALYSIS_SAMPLE_FPS = 20;
 const MAX_ANALYSIS_SECONDS = 14;
-const MAX_ANALYSIS_FRAMES = 168;
+const MAX_ANALYSIS_FRAMES = 280;
 const FRAME_WORKER_TIMEOUT_MS = 7000;
 const OPT_IN_STORAGE_KEY = "freekickDataOptIn";
 const PLAYER_HEIGHT_STORAGE_KEY = "freekickPlayerHeightCm";
@@ -164,19 +164,48 @@ function getBallCenter(ball: BallPrediction): Point | null {
 function selectBallCandidate(
   balls: BallPrediction[],
   activeFoot: Point | null,
-  previousBall: Point | null
+  previousBall: Point | null,
+  canvas: HTMLCanvasElement,
+  hasImpactStarted: boolean
 ): BallPrediction | null {
   let selected: BallPrediction | null = null;
   let selectedScore = Number.NEGATIVE_INFINITY;
+  const preImpactFootRadius = Math.max(90, Math.min(260, canvas.width * 0.24));
+  const activeTrackIsNearFoot =
+    !activeFoot || !previousBall || calculateDistance(previousBall, activeFoot) < preImpactFootRadius * 1.2;
 
   for (const ball of balls) {
     const center = getBallCenter(ball);
     if (!center) continue;
 
+    const [x, y, width, height] = ball.bbox;
+    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) continue;
+
+    const maxSide = Math.max(width, height);
+    const minSide = Math.min(width, height);
+    const aspect = maxSide / Math.max(minSide, 1);
+    const distToFoot = activeFoot ? calculateDistance(center, activeFoot) : Number.POSITIVE_INFINITY;
+
+    if (!hasImpactStarted && activeFoot && !activeTrackIsNearFoot && distToFoot > preImpactFootRadius) {
+      continue;
+    }
+
+    if (!hasImpactStarted && activeFoot && !previousBall && distToFoot > preImpactFootRadius) {
+      continue;
+    }
+
     const modelScore = ball.score ?? 0.5;
-    const previousDistancePenalty = previousBall ? Math.min(1.5, calculateDistance(center, previousBall) * 0.004) : 0;
-    const footDistancePenalty = !previousBall && activeFoot ? Math.min(0.8, calculateDistance(center, activeFoot) * 0.0015) : 0;
-    const rankingScore = modelScore - previousDistancePenalty - footDistancePenalty;
+    const previousDistancePenalty = previousBall
+      ? Math.min(1.8, calculateDistance(center, previousBall) / Math.max(110, canvas.width * 0.14))
+      : 0;
+    const footDistancePenalty =
+      activeFoot && !hasImpactStarted ? Math.min(1.4, distToFoot / preImpactFootRadius) : 0;
+    const footProximityBonus =
+      activeFoot && !hasImpactStarted ? Math.max(0, 0.9 * (1 - distToFoot / preImpactFootRadius)) : 0;
+    const largeMotionPenalty = Math.max(0, (maxSide - Math.max(44, canvas.width * 0.065)) / Math.max(60, canvas.width * 0.08));
+    const shapePenalty = Math.max(0, aspect - 1.8) * 0.25;
+    const rankingScore =
+      modelScore + footProximityBonus - previousDistancePenalty - footDistancePenalty - largeMotionPenalty - shapePenalty;
 
     if (rankingScore > selectedScore) {
       selected = ball;
@@ -386,7 +415,7 @@ export default function AnalyzePage() {
   });
   const [videoFile, setVideoFile] = useState<File | null>(null);
 
-  const prevFootSamplesRef = useRef<Partial<Record<FootSide, TimedPoint>>>({});
+  const prevFootSamplesRef = useRef<Record<string, TimedPoint>>({});
   const prevBallSampleRef = useRef<TimedPoint | null>(null);
 
   const isPoseProcessingRef = useRef(false);
@@ -468,74 +497,79 @@ export default function AnalyzePage() {
     if (!ctx || !canvas || landmarks.length === 0) return;
 
     poseDetectionsRef.current += 1;
+    const footLandmarks: Array<{ side: FootSide; index: number }> = [
+      { side: "left", index: 31 },
+      { side: "right", index: 32 },
+    ];
+    let fastestFoot:
+      | {
+          side: FootSide;
+          point: Point;
+          velocityPxPerSecond: number;
+          landmark: NormalizedLandmark[];
+        }
+      | null = null;
 
-    for (const landmark of landmarks) {
+    for (const [poseIndex, landmark] of landmarks.entries()) {
       drawLandmarks(ctx, landmark);
       drawConnectors(ctx, landmark, POSE_CONNECTIONS, {
         color: "rgba(0, 255, 0, 0.7)",
         lineWidth: 3,
       });
 
-      const footLandmarks: Array<{ side: FootSide; index: number }> = [
-        { side: "left", index: 31 },
-        { side: "right", index: 32 },
-      ];
-
-      let fastestFoot:
-        | {
-            side: FootSide;
-            point: Point;
-            velocityPxPerSecond: number;
-          }
-        | null = null;
-
       for (const foot of footLandmarks) {
         const point = toCanvasPoint(landmark[foot.index], canvas);
         if (!point) continue;
 
-        const previous = prevFootSamplesRef.current[foot.side];
+        const footKey = `${poseIndex}:${foot.side}`;
+        const previous = prevFootSamplesRef.current[footKey];
         if (previous) {
           const dtSeconds = Math.max((timestampMs - previous.timeMs) / 1000, 1 / 120);
           const velocityPxPerSecond = calculateDistance(point, previous) / dtSeconds;
+          const activeFoot = activeFootPosRef.current;
+          const switchPenalty = activeFoot ? Math.min(220, calculateDistance(point, activeFoot) * 0.25) : 0;
+          const rankingVelocity = velocityPxPerSecond - switchPenalty;
 
-          if (!fastestFoot || velocityPxPerSecond > fastestFoot.velocityPxPerSecond) {
+          if (!fastestFoot || rankingVelocity > fastestFoot.velocityPxPerSecond) {
             fastestFoot = {
               side: foot.side,
               point,
-              velocityPxPerSecond,
+              velocityPxPerSecond: rankingVelocity,
+              landmark,
             };
           }
         }
 
-        prevFootSamplesRef.current[foot.side] = {
+        prevFootSamplesRef.current[footKey] = {
           ...point,
           timeMs: timestampMs,
         };
       }
+    }
 
-      if (
-        fastestFoot &&
-        fastestFoot.velocityPxPerSecond > FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND
-      ) {
-        const plant = PLANT_LANDMARKS_BY_KICKING_FOOT[fastestFoot.side];
-        const nose = toCanvasPoint(landmark[0], canvas);
-        const plantHip = toCanvasPoint(landmark[plant.hip], canvas);
-        const plantKnee = toCanvasPoint(landmark[plant.knee], canvas);
-        const plantAnkle = toCanvasPoint(landmark[plant.ankle], canvas);
-        const plantShoulder = toCanvasPoint(landmark[plant.shoulder], canvas);
+    if (
+      fastestFoot &&
+      fastestFoot.velocityPxPerSecond > FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND
+    ) {
+      const plant = PLANT_LANDMARKS_BY_KICKING_FOOT[fastestFoot.side];
+      const landmark = fastestFoot.landmark;
+      const nose = toCanvasPoint(landmark[0], canvas);
+      const plantHip = toCanvasPoint(landmark[plant.hip], canvas);
+      const plantKnee = toCanvasPoint(landmark[plant.knee], canvas);
+      const plantAnkle = toCanvasPoint(landmark[plant.ankle], canvas);
+      const plantShoulder = toCanvasPoint(landmark[plant.shoulder], canvas);
 
-        activeFootPosRef.current = fastestFoot.point;
-        activeFootSideRef.current = fastestFoot.side;
-        if (nose) nosePosRef.current = nose;
-        if (plantAnkle) anklePosRef.current = plantAnkle;
+      activeFootPosRef.current = fastestFoot.point;
+      activeFootSideRef.current = fastestFoot.side;
+      if (nose) nosePosRef.current = nose;
+      if (plantAnkle) anklePosRef.current = plantAnkle;
 
-        if (plantHip && plantKnee && plantAnkle && plantShoulder) {
-          formResultRef.current = calculateFormScore(plantHip, plantKnee, plantAnkle, plantShoulder);
-        }
-      } else if (fastestFoot) {
-        activeFootPosRef.current = fastestFoot.point;
-        activeFootSideRef.current = fastestFoot.side;
+      if (plantHip && plantKnee && plantAnkle && plantShoulder) {
+        formResultRef.current = calculateFormScore(plantHip, plantKnee, plantAnkle, plantShoulder);
       }
+    } else if (fastestFoot) {
+      activeFootPosRef.current = fastestFoot.point;
+      activeFootSideRef.current = fastestFoot.side;
     }
   }, []);
 
@@ -544,7 +578,13 @@ export default function AnalyzePage() {
     const ctx = canvas?.getContext("2d");
     if (!ctx || !canvas || balls.length === 0) return;
 
-    const ball = selectBallCandidate(balls, activeFootPosRef.current, prevBallSampleRef.current);
+    const ball = selectBallCandidate(
+      balls,
+      activeFootPosRef.current,
+      prevBallSampleRef.current,
+      canvas,
+      impactTimeMsRef.current !== null
+    );
     if (!ball) return;
 
     const center = getBallCenter(ball);
@@ -582,14 +622,16 @@ export default function AnalyzePage() {
       ) {
         const activeFoot = activeFootPosRef.current;
         const distToFoot = activeFoot ? calculateDistance(center, activeFoot) : Number.POSITIVE_INFINITY;
+        const previousDistToFoot = activeFoot ? calculateDistance(previous, activeFoot) : Number.POSITIVE_INFINITY;
         const impactDistanceThreshold = Math.max(100, Math.min(260, canvas.width * 0.22));
-        const hasFootConfirmation = activeFoot ? distToFoot < impactDistanceThreshold : false;
-        const hasBallOnlyConfirmation = !activeFoot || poseDetectionsRef.current < 3;
+        const hasFootConfirmation =
+          activeFoot ? Math.min(distToFoot, previousDistToFoot) < impactDistanceThreshold : false;
         const hasStrongBallConfirmation =
+          !activeFoot &&
           ballDetectionsRef.current >= 3 &&
           ballVelocityPxPerSecond > BALL_VELOCITY_THRESHOLD_PX_PER_SECOND * 1.6;
 
-        if (hasFootConfirmation || hasBallOnlyConfirmation || hasStrongBallConfirmation) {
+        if (hasFootConfirmation || hasStrongBallConfirmation) {
           setImpactDetected(true);
           impactFrameIndexRef.current = frameCounterRef.current;
           impactTimeMsRef.current = timestampMs;
@@ -879,8 +921,7 @@ export default function AnalyzePage() {
       ballStartTimeMs !== null &&
       ballEndTimeMs !== null &&
       nosePos &&
-      anklePos &&
-      formResult;
+      anklePos;
 
     let finalSpeed = 0;
     let rawSpeed = 0;
@@ -917,8 +958,15 @@ export default function AnalyzePage() {
 
       if (finalSpeed > 0) {
         confidence = "high";
-        finalFormResult = formResult;
-        feedbacks = generateFeedback(formResult, finalSpeed);
+        if (formResult) {
+          finalFormResult = formResult;
+          feedbacks = generateFeedback(formResult, finalSpeed);
+        } else {
+          feedbacks = [
+            "공 이동 구간을 기준으로 구속을 산출했습니다.",
+            "자세 기준점이 부족해 폼 점수는 보수적으로 표시했습니다.",
+          ];
+        }
         const referenceFeedbacks: string[] = [];
 
         if (referenceCalibrationRef.current?.enabled && referenceCalibrationRef.current.sampleCount > 0) {

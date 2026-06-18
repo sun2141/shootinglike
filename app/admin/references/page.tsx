@@ -21,6 +21,7 @@ import {
   Upload,
 } from "lucide-react";
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
+import { BrowserVideoAnalyzer, type ClientVideoAnalysisResult } from "@/lib/analysis/client-video-analyzer";
 import { getAnalysisFrameSize } from "@/lib/analysis/frame-size";
 import { calculateDistance, type Point } from "@/lib/analysis/math";
 
@@ -178,17 +179,41 @@ interface BatchClipRow {
 
 interface CutClipResult {
   id: string;
+  sampleId: string;
+  sampleIndex: number;
   name: string;
   url: string;
   sizeBytes: number;
   startSeconds: number;
   endSeconds: number;
+  labelSuffix: string;
+  knownSpeedKmh: number | null;
 }
 
 interface ClipCutProgress {
   current: number;
   total: number;
   label: string;
+}
+
+interface ClipAnalysisResult {
+  clipId: string;
+  measuredSpeedKmh: number | null;
+  knownSpeedKmh: number | null;
+  errorPercent: number | null;
+  calibrationFactor: number | null;
+  confidence: ClientVideoAnalysisResult["confidence"];
+  framesAnalyzed: number;
+  ballDisplacementPx?: number;
+  kickerHeightPx?: number;
+  message: string;
+}
+
+interface ClipAnalysisProgress {
+  current: number;
+  total: number;
+  label: string;
+  progress: number;
 }
 
 type MeasureMode = "none" | "height" | "ball";
@@ -1056,6 +1081,7 @@ export default function ReferenceAdminPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isBatchSaving, setIsBatchSaving] = useState(false);
   const [isCuttingClips, setIsCuttingClips] = useState(false);
+  const [isAnalyzingClips, setIsAnalyzingClips] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [measureMode, setMeasureMode] = useState<MeasureMode>("none");
   const [heightPoints, setHeightPoints] = useState<Point[]>([]);
@@ -1065,6 +1091,13 @@ export default function ReferenceAdminPage() {
     current: 0,
     total: 0,
     label: "",
+  });
+  const [clipAnalysisResults, setClipAnalysisResults] = useState<Record<string, ClipAnalysisResult>>({});
+  const [clipAnalysisProgress, setClipAnalysisProgress] = useState<ClipAnalysisProgress>({
+    current: 0,
+    total: 0,
+    label: "",
+    progress: 0,
   });
   const [pastedAiDraftText, setPastedAiDraftText] = useState("");
   const [aiSegmentDraft, setAiSegmentDraft] = useState<AiSegmentDraft | null>(null);
@@ -1162,6 +1195,8 @@ export default function ReferenceAdminPage() {
       current.forEach((clip) => URL.revokeObjectURL(clip.url));
       return [];
     });
+    setClipAnalysisResults({});
+    setClipAnalysisProgress({ current: 0, total: 0, label: "", progress: 0 });
   }, []);
 
   useEffect(() => {
@@ -2016,7 +2051,133 @@ export default function ReferenceAdminPage() {
     }
   };
 
-  const cutBatchClips = async () => {
+  const analyzeCutClips = async (clips: CutClipResult[] = cutClips) => {
+    if (clips.length === 0) {
+      setError("먼저 클립을 생성해 주세요.");
+      return;
+    }
+
+    setIsAnalyzingClips(true);
+    setError(null);
+    setMessage(null);
+    setClipAnalysisResults({});
+    setClipAnalysisProgress({ current: 0, total: clips.length, label: "분석 워커 준비 중", progress: 0 });
+
+    const analyzer = new BrowserVideoAnalyzer();
+    const playerHeightCm = parseFormNumber(form.playerHeightCm);
+    let successfulAnalyses = 0;
+
+    try {
+      await analyzer.init();
+
+      for (const [clipIndex, clip] of clips.entries()) {
+        setClipAnalysisProgress({
+          current: clipIndex + 1,
+          total: clips.length,
+          label: clip.labelSuffix || clip.name,
+          progress: 0,
+        });
+
+        try {
+          const analysis = await analyzer.analyzeSource(clip.url, {
+            playerHeightCm,
+            onProgress: (progress) => {
+              setClipAnalysisProgress({
+                current: clipIndex + 1,
+                total: clips.length,
+                label: clip.labelSuffix || clip.name,
+                progress: progress.progress,
+              });
+            },
+          });
+          const measuredSpeedKmh = analysis.estimatedSpeedKmh > 0 ? analysis.estimatedSpeedKmh : null;
+          const errorPercent = getSpeedErrorPercent(clip.knownSpeedKmh, measuredSpeedKmh ?? undefined);
+          const calibrationFactor =
+            clip.knownSpeedKmh !== null && measuredSpeedKmh !== null && measuredSpeedKmh > 0
+              ? clip.knownSpeedKmh / measuredSpeedKmh
+              : null;
+          const result: ClipAnalysisResult = {
+            clipId: clip.id,
+            measuredSpeedKmh,
+            knownSpeedKmh: clip.knownSpeedKmh,
+            errorPercent,
+            calibrationFactor,
+            confidence: analysis.confidence,
+            framesAnalyzed: analysis.framesAnalyzed,
+            ballDisplacementPx: analysis.ballDisplacementPx,
+            kickerHeightPx: analysis.kickerHeightPx,
+            message: analysis.feedbacks[0] ?? "앱 분석을 완료했습니다.",
+          };
+
+          setClipAnalysisResults((current) => ({
+            ...current,
+            [clip.id]: result,
+          }));
+
+          if (measuredSpeedKmh !== null) {
+            successfulAnalyses += 1;
+            setBatchSamples((current) =>
+              current.map((sample) =>
+                sample.id === clip.sampleId
+                  ? {
+                      ...sample,
+                      measuredSpeedKmh: measuredSpeedKmh.toFixed(1),
+                      notes: [
+                        sample.notes.trim(),
+                        `App analysis: ${measuredSpeedKmh.toFixed(1)}km/h, ${analysis.framesAnalyzed} frames`,
+                      ]
+                        .filter(Boolean)
+                        .join(" · "),
+                    }
+                  : sample
+              )
+            );
+
+            if (clips.length === 1) {
+              setForm((current) => ({
+                ...current,
+                knownSpeedKmh: current.knownSpeedKmh || (clip.knownSpeedKmh !== null ? clip.knownSpeedKmh.toFixed(1) : ""),
+                measuredSpeedKmh: measuredSpeedKmh.toFixed(1),
+                timingStartSeconds: current.timingStartSeconds || clip.startSeconds.toFixed(3),
+                timingEndSeconds: current.timingEndSeconds || clip.endSeconds.toFixed(3),
+                ballDisplacementPx:
+                  current.ballDisplacementPx || (analysis.ballDisplacementPx ? analysis.ballDisplacementPx.toFixed(1) : ""),
+                bodyHeightPx: current.bodyHeightPx || (analysis.kickerHeightPx ? analysis.kickerHeightPx.toFixed(1) : ""),
+              }));
+            }
+          }
+        } catch (analysisError) {
+          const message = analysisError instanceof Error ? analysisError.message : "앱 분석에 실패했습니다.";
+          setClipAnalysisResults((current) => ({
+            ...current,
+            [clip.id]: {
+              clipId: clip.id,
+              measuredSpeedKmh: null,
+              knownSpeedKmh: clip.knownSpeedKmh,
+              errorPercent: null,
+              calibrationFactor: null,
+              confidence: "failed",
+              framesAnalyzed: 0,
+              message,
+            },
+          }));
+        }
+      }
+
+      setMessage(
+        successfulAnalyses > 0
+          ? `${successfulAnalyses}개 클립의 앱 분석 속도를 Manual Segments에 반영했습니다.`
+          : "클립 분석을 완료했지만 산출 가능한 속도가 없습니다."
+      );
+    } catch (analysisError) {
+      setError(analysisError instanceof Error ? analysisError.message : "클립 분석을 시작하지 못했습니다.");
+    } finally {
+      analyzer.dispose();
+      setIsAnalyzingClips(false);
+    }
+  };
+
+  const cutBatchClips = async (options: { analyzeAfter?: boolean } = {}) => {
     if (!videoFile) {
       setError("클립 생성은 로컬로 불러온 영상 파일에서만 가능합니다.");
       return;
@@ -2088,11 +2249,15 @@ export default function ReferenceAdminPage() {
         const blob = new Blob([new Uint8Array(data)], { type: "video/mp4" });
         nextClips.push({
           id: `${row.index}-${row.startSeconds}-${row.endSeconds}`,
+          sampleId: row.sample.id,
+          sampleIndex: row.index,
           name: outputName,
           url: URL.createObjectURL(blob),
           sizeBytes: blob.size,
           startSeconds: row.startSeconds,
           endSeconds: row.endSeconds,
+          labelSuffix: row.sample.labelSuffix || `Clip ${row.index + 1}`,
+          knownSpeedKmh: row.knownSpeedKmh,
         });
 
         await ffmpeg.deleteFile(outputName).catch(() => undefined);
@@ -2101,7 +2266,11 @@ export default function ReferenceAdminPage() {
       await ffmpeg.deleteFile(inputName).catch(() => undefined);
 
       setCutClips(nextClips);
-      setMessage(`${nextClips.length}개 클립을 생성했습니다. 아래 다운로드 링크를 사용하세요.`);
+      setMessage(`${nextClips.length}개 클립을 생성했습니다.`);
+
+      if (options.analyzeAfter) {
+        await analyzeCutClips(nextClips);
+      }
     } catch (cutError) {
       ffmpegRef.current?.terminate();
       ffmpegRef.current = null;
@@ -2547,18 +2716,18 @@ export default function ReferenceAdminPage() {
                     </span>
                   </div>
 
-                  <div className="mb-4 rounded-xl border border-[var(--color-neon-green)]/30 bg-[var(--color-neon-green)]/5 p-4">
-                    <div className="mb-3 flex items-start justify-between gap-3">
+                  <details className="mb-4 rounded-xl border border-[var(--color-neon-green)]/30 bg-[var(--color-neon-green)]/5 p-4">
+                    <summary className="mb-3 flex cursor-pointer list-none items-start justify-between gap-3">
                       <div>
                         <div className="font-mono text-[10px] tracking-widest text-[var(--color-neon-green)]">
-                          GEMINI / FFMPEG CODE
+                          SEGMENT HELPER
                         </div>
-                        <div className="mt-1 text-sm font-bold text-white">Paste commands and fill rows</div>
+                        <div className="mt-1 text-sm font-bold text-white">AI / FFmpeg / pasted draft</div>
                       </div>
                       <span className="rounded-full border border-white/10 bg-black/20 px-3 py-1 font-mono text-[10px] tracking-widest text-gray-400">
                         {aiSegmentDraft?.segments.length ?? 0} FOUND
                       </span>
-                    </div>
+                    </summary>
 
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-[auto_minmax(0,1fr)]">
                       <button
@@ -2676,7 +2845,7 @@ export default function ReferenceAdminPage() {
                         )}
                       </div>
                     )}
-                  </div>
+                  </details>
 
                   <div className="mb-4 rounded-xl border border-white/10 bg-black/20 p-3">
                     <div className="mb-3 font-mono text-[10px] tracking-widest text-gray-500">DISTANCE BASELINE</div>
@@ -2847,7 +3016,7 @@ export default function ReferenceAdminPage() {
                     })}
                   </div>
 
-                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)]">
+                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
                     <button
                       type="button"
                       onClick={resetBatchSamples}
@@ -2858,7 +3027,7 @@ export default function ReferenceAdminPage() {
                     <button
                       type="button"
                       onClick={saveBatchSamples}
-                      disabled={isBatchSaving || isSaving}
+                      disabled={isBatchSaving || isSaving || isAnalyzingClips}
                       className="flex items-center justify-center gap-2 rounded-lg bg-[var(--color-neon-blue)] px-3 py-2 text-sm font-black text-black transition-transform hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {isBatchSaving ? <Loader2 className="animate-spin" size={16} /> : <Activity size={16} />}
@@ -2866,22 +3035,33 @@ export default function ReferenceAdminPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={cutBatchClips}
-                      disabled={!videoFile || timedBatchSampleCount === 0 || isCuttingClips || isBatchSaving || isSaving}
+                      onClick={() => cutBatchClips()}
+                      disabled={!videoFile || timedBatchSampleCount === 0 || isCuttingClips || isAnalyzingClips || isBatchSaving || isSaving}
                       className="flex items-center justify-center gap-2 rounded-lg border border-[var(--color-neon-green)]/40 px-3 py-2 text-sm font-black text-[var(--color-neon-green)] transition-colors hover:bg-[var(--color-neon-green)]/10 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {isCuttingClips ? <Loader2 className="animate-spin" size={16} /> : <Scissors size={16} />}
                       Cut Clips
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => cutBatchClips({ analyzeAfter: true })}
+                      disabled={!videoFile || timedBatchSampleCount === 0 || isCuttingClips || isAnalyzingClips || isBatchSaving || isSaving}
+                      className="flex items-center justify-center gap-2 rounded-lg bg-[var(--color-neon-green)] px-3 py-2 text-sm font-black text-black transition-transform hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isCuttingClips || isAnalyzingClips ? <Loader2 className="animate-spin" size={16} /> : <Activity size={16} />}
+                      Cut + Analyze
+                    </button>
                   </div>
 
-                  {(isCuttingClips || cutClips.length > 0) && (
+                  {(isCuttingClips || isAnalyzingClips || cutClips.length > 0) && (
                     <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
                       <div className="mb-2 flex items-center justify-between gap-3">
-                        <div className="font-mono text-[10px] tracking-widest text-gray-500">CUT OUTPUTS</div>
+                        <div className="font-mono text-[10px] tracking-widest text-gray-500">CUT + APP ANALYSIS</div>
                         <div className="text-xs text-gray-400">
                           {isCuttingClips
                             ? `${clipCutProgress.current}/${clipCutProgress.total}`
+                            : isAnalyzingClips
+                              ? `${clipAnalysisProgress.current}/${clipAnalysisProgress.total}`
                             : `${cutClips.length} files`}
                         </div>
                       </div>
@@ -2905,25 +3085,82 @@ export default function ReferenceAdminPage() {
                         </div>
                       )}
 
+                      {isAnalyzingClips && (
+                        <div className="mt-3">
+                          <div className="mb-2 flex items-center justify-between gap-3 text-xs text-gray-300">
+                            <span className="truncate">{clipAnalysisProgress.label || "Analyzing"}</span>
+                            <span className="font-mono text-[10px] text-gray-500">{clipAnalysisProgress.progress}%</span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                            <div
+                              className="h-full bg-[var(--color-neon-blue)] transition-all"
+                              style={{ width: `${Math.max(4, clipAnalysisProgress.progress)}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
                       {cutClips.length > 0 && (
                         <div className="mt-3 space-y-2">
                           {cutClips.map((clip) => (
-                            <a
+                            <div
                               key={clip.id}
-                              href={clip.url}
-                              download={clip.name}
-                              className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs transition-colors hover:bg-white/10"
+                              className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs"
                             >
-                              <span className="min-w-0">
-                                <span className="block truncate font-bold text-white">{clip.name}</span>
-                                <span className="mt-1 block font-mono text-[10px] text-gray-500">
-                                  {formatTimestamp(clip.startSeconds)} - {formatTimestamp(clip.endSeconds)} ·{" "}
-                                  {formatFileSize(clip.sizeBytes)}
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="min-w-0">
+                                  <span className="block truncate font-bold text-white">{clip.labelSuffix || clip.name}</span>
+                                  <span className="mt-1 block font-mono text-[10px] text-gray-500">
+                                    {formatTimestamp(clip.startSeconds)} - {formatTimestamp(clip.endSeconds)} ·{" "}
+                                    {formatFileSize(clip.sizeBytes)}
+                                  </span>
                                 </span>
-                              </span>
-                              <Download size={16} className="shrink-0 text-[var(--color-neon-green)]" />
-                            </a>
+                                <a
+                                  href={clip.url}
+                                  download={clip.name}
+                                  className="shrink-0 rounded-lg border border-white/15 p-2 text-[var(--color-neon-green)] transition-colors hover:bg-white/10"
+                                  aria-label={`Download ${clip.name}`}
+                                >
+                                  <Download size={16} />
+                                </a>
+                              </div>
+                              {clipAnalysisResults[clip.id] && (
+                                <div className="mt-2 grid grid-cols-3 gap-2">
+                                  <div className="rounded bg-black/20 p-2">
+                                    <div className="font-mono text-[9px] tracking-widest text-gray-500">ACTUAL</div>
+                                    <div className="font-black text-white">{formatNumber(clipAnalysisResults[clip.id].knownSpeedKmh)}</div>
+                                  </div>
+                                  <div className="rounded bg-black/20 p-2">
+                                    <div className="font-mono text-[9px] tracking-widest text-gray-500">APP</div>
+                                    <div className="font-black text-[var(--color-neon-blue)]">
+                                      {formatNumber(clipAnalysisResults[clip.id].measuredSpeedKmh)}
+                                    </div>
+                                  </div>
+                                  <div className="rounded bg-black/20 p-2">
+                                    <div className="font-mono text-[9px] tracking-widest text-gray-500">ERROR</div>
+                                    <div className="font-black text-white">
+                                      {formatNumber(clipAnalysisResults[clip.id].errorPercent)}
+                                      <span className="text-[10px] text-gray-500">%</span>
+                                    </div>
+                                  </div>
+                                  <div className="col-span-3 text-[11px] leading-relaxed text-gray-500">
+                                    {clipAnalysisResults[clip.id].confidence.toUpperCase()} ·{" "}
+                                    {clipAnalysisResults[clip.id].framesAnalyzed} frames ·{" "}
+                                    {clipAnalysisResults[clip.id].message}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           ))}
+                          <button
+                            type="button"
+                            onClick={() => analyzeCutClips()}
+                            disabled={isAnalyzingClips || isCuttingClips}
+                            className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--color-neon-blue)]/40 px-3 py-2 text-sm font-black text-[var(--color-neon-blue)] transition-colors hover:bg-[var(--color-neon-blue)]/10 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {isAnalyzingClips ? <Loader2 className="animate-spin" size={16} /> : <Activity size={16} />}
+                            Analyze Existing Clips
+                          </button>
                         </div>
                       )}
                     </div>

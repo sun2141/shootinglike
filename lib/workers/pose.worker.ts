@@ -25,7 +25,7 @@ async function initPoseLandmarker() {
           delegate,
         },
         runningMode: "VIDEO",
-        numPoses: 1,
+        numPoses: 3,
       });
 
     try {
