@@ -52,28 +52,36 @@ self.onmessage = async (e: MessageEvent) => {
   else if (type === "DETECT" && imageBitmap) {
     if (!poseLandmarker) {
       closeImageSource(imageBitmap);
-      self.postMessage({ type: "DETECT_RESULT", landmarks: [], timestamp, requestId });
+      self.postMessage({ type: "DETECT_RESULT", landmarks: [], worldLandmarks: [], timestamp, requestId });
       return;
     }
 
     try {
       const results = poseLandmarker.detectForVideo(imageBitmap, timestamp);
-      
+
       // Serialize landmarks for main thread
       let serializedLandmarks: NormalizedLandmark[][] = [];
       if (results && results.landmarks) {
         serializedLandmarks = results.landmarks;
       }
-      
-      self.postMessage({ 
-        type: "DETECT_RESULT", 
+
+      // World landmarks are metric and hip-centred, so joint angles derived from
+      // them do not change with the camera position.
+      let serializedWorldLandmarks: NormalizedLandmark[][] = [];
+      if (results && results.worldLandmarks) {
+        serializedWorldLandmarks = results.worldLandmarks;
+      }
+
+      self.postMessage({
+        type: "DETECT_RESULT",
         landmarks: serializedLandmarks,
+        worldLandmarks: serializedWorldLandmarks,
         timestamp,
         requestId,
       });
     } catch (err) {
       console.error("Detection error:", err);
-      self.postMessage({ type: "DETECT_RESULT", landmarks: [], timestamp, requestId });
+      self.postMessage({ type: "DETECT_RESULT", landmarks: [], worldLandmarks: [], timestamp, requestId });
     } finally {
       closeImageSource(imageBitmap);
     }

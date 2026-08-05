@@ -5,6 +5,112 @@
 
 ---
 
+## 2026-08-05 (3) · Claude — 레퍼런스 보정 신뢰도 게이트 + 배포 준비
+
+### 배경
+기존에는 레퍼런스가 **1건만 있어도** 보정 계수가 전체 사용자에게 적용됐다(`enabled: factors.length > 0`).
+표본 수가 아니라 **측정 신뢰도**로 게이트를 걸도록 변경.
+
+### 스키마 (마이그레이션 필요)
+- `prisma/migrations/20260805120000_add_reference_measurement_quality/migration.sql`
+- `ReferenceVideo`에 `measurementUncertainty Float?`, `measurementGrade String?`, `trajectoryPoints Int?` 추가.
+- 기존 행은 NULL → **품질 미기록으로 간주해 보정에서 자동 제외**. 별도 삭제 작업 없이 옛 레코드가 무력화된다.
+
+### 게이트 로직 (`lib/analysis/reference-calibration.ts`)
+1. 개별 샘플 필터: `measurementUncertainty > 0.3`(=grade low) 또는 미기록이면 제외.
+2. 통과한 샘플로 계수의 **상대 표준오차** 계산. 두 추정치 중 **큰 쪽**을 채택:
+   - propagated: 각 샘플이 주장하는 정밀도의 가중 합성 `1/√Σ(1/u²)`
+   - empirical: 샘플 간 실제 산포 `sd/√n / mean`
+   - → 서로 값이 어긋나는 클립들이 "각자 자신 있다"고 주장하는 것만으로는 게이트를 못 연다.
+3. `factorUncertainty ≤ 0.08`(8%)일 때만 `enabled: true`.
+4. 거리 스케일(`metersPerPixel`)도 속도 보정이 켜진 뒤에만 제공.
+
+예: 신뢰도 ±15% 클립이 4개 일치하면 8%/합격. 같은 4개라도 계수가 흩어지면 불합격. 1개는 아무리 좋아도 불합격.
+
+### 수정
+- `app/api/admin/references/route.ts`: 품질 필드 수신·검증·저장.
+- `app/api/reference-calibration/route.ts`: 명시적 `select` 제거(스키마 변경 시 클라이언트 미재생성으로 빌드가 깨지는 것을 방지).
+- `app/admin/references/page.tsx`: 저장 시 파이프라인 신뢰도 전달. 상단에 **보정 적용 여부 / 계수 불확실도 / 기준 대비 진행바 / 제외 건수** 표시, 목록에 행별 측정 신뢰도 컬럼 추가.
+- `package.json`: `build`를 `prisma migrate deploy && next build --webpack`로 변경 → **배포 시 마이그레이션 자동 적용**. 원치 않으면 되돌리고 수동으로 `npx prisma migrate deploy` 실행할 것.
+- `scripts/test-analysis.mjs`: 게이트 테스트 20건 추가 (총 60 assertion).
+
+### 검증
+- `npx tsc --noEmit`, `npx eslint .`, `npm test`(60 assertion) 통과.
+- 이 환경에서는 Prisma 엔진 다운로드가 차단되어 `prisma generate` 실행 불가. 로컬 `npm install`(postinstall)에서 자동 생성됨.
+
+## 2026-08-05 (2) · Claude — 분석 코어 통합 + 정확도 수정 + 레퍼런스 배치 자동화
+
+> **Codex 주의**: `app/analyze/page.tsx`와 `app/admin/references/page.tsx`를 전면 교체했습니다.
+> 추적/속도 로직은 이제 두 화면 어디에도 없고 `lib/analysis/pipeline/`에만 있습니다.
+
+### 신규
+- `lib/analysis/pipeline/` — 공용 분석 코어.
+  - `frame-source.ts`: `fastSeek` 제거. `requestVideoFrameCallback`의 `mediaTime`으로 **실제 표시 프레임 시각**을 반환. 기존에는 요청 시각(`targetTime*1000`)으로 dt를 계산해 25fps 클립에서 ±10%+ 오차.
+  - `kick-tracker.ts`: 프레임별 추적 상태. 임계값을 픽셀 상수 → **키커 신장 비율**로 전환(0.9 height/s, 0.65 height/s). person track ID 고정으로 골키퍼 오추적 차단. 씬 컷 시 트래커 리셋. 폼 계산 프레임을 임팩트 최근접으로 고정.
+  - `trajectory.ts`: 결정적 exhaustive RANSAC + 최소자승 재적합. **2점(시작/끝) 계산 폐기**.
+  - `confidence.ts`: 타이밍 양자화·피팅 잔차·스케일·카메라 이동·씬 컷·깊이 이동 의심을 제곱합으로 전파해 `± 구간`과 high/medium/low 등급 산출.
+  - `vision-workers.ts`: 워커 메시지를 Promise로 감싼 공용 브리지.
+  - `run-analysis.ts`: 프레임 루프 + 결과 조립. `/analyze`와 admin이 동일 경로 사용.
+- `lib/analysis/reference-batch.ts` — 파일명/CSV 정답 파싱, MAE·편향·MAPE·P90·권장 계수 산출.
+- `scripts/test-analysis.mjs` + `npm test` — 순수 로직 회귀 테스트 40 assertion.
+- `docs/VIDEO_ANALYSIS_AUTOMATION.md` — 진단 및 로드맵(같은 날 1차 항목).
+
+### 수정
+- `lib/analysis/speed.ts`: 코–발목 span이 실제 키의 0.88배임을 반영(`NOSE_TO_ANKLE_HEIGHT_RATIO`). 기존 코드는 px/m를 약 12% 과소평가해 **속도를 상시 약 14% 과대평가**하고 있었음 → 이번 수정으로 **측정값이 약 12% 낮아짐**. `pixelSpeedToKmh` / `getPixelsPerMeter` 신규 export.
+  - 이 편향은 2D 투영에 의한 과소평가와 방향이 반대라 서로 상쇄되고 있었음. 정면 촬영 클립은 이제 더 낮은 값이 나온다.
+- `lib/analysis/form.ts`: `calculateFormScoreFromWorld` 추가(worldLandmarks 3D 각도 → 촬영각 무관). `FormResult.source`로 2d/world 구분.
+- `lib/workers/pose.worker.ts`: `worldLandmarks` 전달.
+- `lib/workers/ball.worker.ts`: 모션 분석 폭 420 → **640**(11m 거리 공이 5px로 뭉개지던 문제). 전역 변화 픽셀 비율로 **씬 컷 감지 + 카메라 이동 지표** 반환. 블롭 크기 임계값을 폭 기준으로 스케일.
+- `app/analyze/page.tsx`: 1,515줄 → 749줄. 추적 ref 20여 개 제거, 코어 호출로 대체. 속도 카드에 `± 범위 · 신뢰도` 표시, 저신뢰 시 경고 배너. 촬영 안내를 "측면 촬영" 중심으로 변경.
+- `app/admin/references/page.tsx`: 3,472줄 → 760줄. **클립 다중 선택 → 정답 자동 매칭 → 전체 분석 → 정확도 리포트 → DB 일괄 저장** 4단계로 재구성.
+- `lib/analysis/client-video-analyzer.ts`: 709줄 → 130줄. 중복 추적 로직 제거, 코어 위임.
+- `package.json`: `@ffmpeg/*` 의존성과 `setup-ffmpeg` postinstall 제거, `test` 스크립트 추가.
+- `next.config.ts`, `eslint.config.mjs`: FFmpeg 관련 주석/ignore 제거.
+
+### 삭제
+- `app/api/admin/references/analyze-video-segments/route.ts`, `analyze-link/route.ts` (Gemini 기반. `GEMINI_API_KEY` 미설정 상태라 실사용 불가였음)
+- `public/ffmpeg/worker.js`, `scripts/setup-ffmpeg.mjs` (브라우저 컷 기능 폐지)
+
+### 검증
+- `npx tsc --noEmit` 통과.
+- `npx eslint .` 통과.
+- `npm test` — 40 assertion 통과(궤적 피팅 이상치 제거, 스케일 환산, 신뢰도 등급, 정답표 파싱, 배치 지표).
+- `npm run build`는 이 환경(Linux arm64 + macOS용 node_modules)에서 SWC 바이너리가 없어 실행 불가. **로컬에서 `npm install` 후 `npm run build` 확인 필요.**
+
+### 후속 필요 (중요)
+1. `npm install` 실행 — `@ffmpeg/*` 제거 반영.
+2. **기존 ReferenceVideo 레코드는 폐기 후 재측정 권장.** 0.88 스케일 보정과 RANSAC 도입으로 measured 값 기준이 바뀌어 기존 `calibrationFactor`가 무효.
+3. 실제 클립으로 `/admin/references` 배치를 돌려 MAE/편향 baseline을 남길 것. 이후 알고리즘 수정은 이 수치 대비로 판단.
+4. 남은 구조적 오차(2D 투영, 카메라 에고모션)는 미해결 — `docs/VIDEO_ANALYSIS_AUTOMATION.md` Step 3 참조.
+
+## 2026-08-05 · Claude — 영상분석 파이프라인 진단 및 자동화 개선 로드맵 정리
+
+### 추가
+- `docs/VIDEO_ANALYSIS_AUTOMATION.md` 신규 작성. 코드 변경 없음(분석/문서만).
+
+### 핵심 진단
+- **타임스탬프 신뢰 불가**: `app/analyze/page.tsx`의 `waitForVideoSeek()`가 `video.fastSeek()`(키프레임 스냅 허용)을 쓰면서 속도 계산 시각은 요청값 `targetTime*1000`을 사용 → 25fps 클립에서 dt 오차 ±10%+.
+- **2D 투영 거리로 3D 속도 추정**(`lib/analysis/speed.ts`): 깊이 방향 비행에서 구조적 과소평가. global scalar 보정으로 교정 불가.
+- **카메라 에고모션 미보정**: 패닝이 모션 차분 검출과 픽셀 변위 양쪽을 오염.
+- **공 검출 해상도 손실**: 1080p → 960 → 420px. 11m 거리 공이 5~6px로 블롭 임계값 경계에 걸림.
+- **속도 2점 계산**: 시작/끝 한 쌍만 사용해 단일 오검출에 취약.
+- **신체 스케일 편향**: 코–발목(실제 키의 약 0.88배)을 전신 키로 나눠 속도를 상시 ~11% 과소평가.
+- **절대 픽셀 임계값**(300/220 px/s)이 해상도·줌에 종속.
+- **신뢰도가 사실상 이진**: `finalSpeed > 0`이면 `high` → 틀린 값에 high가 붙음.
+- **검증 자동화 부재**: 회귀 지표(MAE/bias/실패율)가 없어 개선 여부를 수치로 판단 불가.
+- **데이터 루프 단절**: `app/api/dataset/upload`가 `process.cwd()/.data/uploads`에 기록 → Vercel 서버리스에서 미동작.
+- **로직 이원화**: `/analyze`와 `lib/analysis/client-video-analyzer.ts`가 분석 로직을 중복 보유.
+
+### 제안 순서
+1. Step 0: 분석 코어를 `lib/analysis/pipeline/`으로 추출하고 `/analyze`·admin 분석기를 통합 (모든 후속 작업의 전제).
+2. Step 1: `fastSeek` 제거 + RVFC `mediaTime`, 궤적 RANSAC 피팅, 임계값 정규화, 0.88 계수 보정, 씬 컷 감지, person track 고정, 신뢰도 구간(±).
+3. Step 2: fixture 클립 + headless eval + CI 회귀 게이트 (Step 1과 같은 스프린트).
+4. Step 3~4: 에고모션 보정, ROI 2단계 검출, 공 지름 기반 깊이 추정, WebCodecs, 학습형 검출기, 조건별 calibration set.
+
+### 후속 필요
+- Codex와 Step 0 리팩터링 범위 합의 필요(`app/analyze/page.tsx` 1,515줄 분해 대상 확정).
+- 문서 6장의 열린 질문 3건(촬영 조건 제한 여부 / 서버 정밀 분석 모드 / 레퍼런스 클립 커밋 가능 여부) 결정 필요.
+
 ## 2026-06-18 (4) · Codex — 레퍼런스DB 컷 추출 → 앱 분석 연결
 
 ### 수정

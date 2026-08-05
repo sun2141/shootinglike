@@ -2,8 +2,16 @@ let previousMotionFrame: MotionFrame | null = null;
 let motionCanvas: OffscreenCanvas | null = null;
 let sourceMotionCanvas: OffscreenCanvas | null = null;
 
-const MOTION_ANALYSIS_WIDTH = 420;
+/**
+ * Motion analysis width. Raised from 420px: at 420 a ball 11m away in a 1080p
+ * clip collapsed to ~5px, right on the blob rejection threshold, so it competed
+ * with sensor noise.
+ */
+const MOTION_ANALYSIS_WIDTH = 640;
 const MOTION_DIFF_THRESHOLD = 22;
+/** Above this fraction of changed pixels the frame is treated as an edit cut. */
+const SCENE_CUT_CHANGED_RATIO = 0.45;
+const REFERENCE_WIDTH = 420;
 
 interface BallDetection {
   bbox: number[];
@@ -128,7 +136,15 @@ function readMotionFrame(imageSource: ImageBitmap | ImageData): MotionFrameData 
   };
 }
 
-function detectMotionBalls(current: MotionFrameData): BallDetection[] {
+interface MotionResult {
+  detections: BallDetection[];
+  changedRatio: number;
+  sceneChanged: boolean;
+}
+
+const EMPTY_MOTION_RESULT: MotionResult = { detections: [], changedRatio: 0, sceneChanged: false };
+
+function detectMotionBalls(current: MotionFrameData): MotionResult {
   const previous = previousMotionFrame;
   previousMotionFrame = {
     width: current.width,
@@ -137,10 +153,32 @@ function detectMotionBalls(current: MotionFrameData): BallDetection[] {
   };
 
   if (!previous || previous.width !== current.width || previous.height !== current.height) {
-    return [];
+    // Dimension change means a brand new source: treat it as a cut.
+    return { detections: [], changedRatio: 0, sceneChanged: Boolean(previous) };
   }
 
   const { width, height } = current;
+
+  // Global change ratio doubles as an edit-cut detector and a camera-motion proxy.
+  let changedPixels = 0;
+  for (let index = 0; index < current.gray.length; index += 1) {
+    if (Math.abs(current.gray[index] - previous.gray[index]) >= MOTION_DIFF_THRESHOLD) {
+      changedPixels += 1;
+    }
+  }
+  const changedRatio = changedPixels / Math.max(1, current.gray.length);
+
+  if (changedRatio >= SCENE_CUT_CHANGED_RATIO) {
+    // Blob extraction is meaningless across a cut and would flood the ranking.
+    return { detections: [], changedRatio, sceneChanged: true };
+  }
+
+  const sizeScale = width / REFERENCE_WIDTH;
+  const maxArea = 1800 * sizeScale * sizeScale;
+  const maxSideLimit = 82 * sizeScale;
+  const sizePenaltyStart = 42 * sizeScale;
+  const sizePenaltyRange = 60 * sizeScale;
+
   const visited = new Uint8Array(width * height);
   const detections: BallDetection[] = [];
 
@@ -204,9 +242,9 @@ function detectMotionBalls(current: MotionFrameData): BallDetection[] {
 
     if (
       area < 4 ||
-      area > 1800 ||
+      area > maxArea ||
       maxSide < 4 ||
-      maxSide > 82 ||
+      maxSide > maxSideLimit ||
       minSide < 2 ||
       aspect < 0.35 ||
       aspect > 3.2 ||
@@ -217,7 +255,7 @@ function detectMotionBalls(current: MotionFrameData): BallDetection[] {
 
     const averageDiff = diffSum / area;
     const roundness = minSide / Math.max(maxSide, 1);
-    const sizePenalty = Math.max(0, (maxSide - 42) / 60);
+    const sizePenalty = Math.max(0, (maxSide - sizePenaltyStart) / sizePenaltyRange);
     const score = Math.max(0.12, Math.min(0.88, averageDiff / 255 * 0.9 + roundness * 0.25 - sizePenalty));
 
     detections.push({
@@ -233,9 +271,11 @@ function detectMotionBalls(current: MotionFrameData): BallDetection[] {
     });
   }
 
-  return detections
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8);
+  return {
+    detections: detections.sort((a, b) => b.score - a.score).slice(0, 8),
+    changedRatio,
+    sceneChanged: false,
+  };
 }
 
 self.onmessage = async (e) => {
@@ -250,20 +290,26 @@ self.onmessage = async (e) => {
     
     try {
       const motionFrame = readMotionFrame(imageBitmap);
-      const motionPredictions = motionFrame ? detectMotionBalls(motionFrame) : [];
-      const ballPredictions = motionPredictions
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 10);
-      
-      self.postMessage({ 
-        type: "DETECT_RESULT", 
-        balls: ballPredictions,
+      const motion = motionFrame ? detectMotionBalls(motionFrame) : EMPTY_MOTION_RESULT;
+
+      self.postMessage({
+        type: "DETECT_RESULT",
+        balls: motion.detections,
+        sceneChanged: motion.sceneChanged,
+        changedRatio: motion.changedRatio,
         timestamp,
         requestId,
       });
     } catch (error) {
       console.error("Ball detection error:", error);
-      self.postMessage({ type: "DETECT_RESULT", balls: [], timestamp, requestId });
+      self.postMessage({
+        type: "DETECT_RESULT",
+        balls: [],
+        sceneChanged: false,
+        changedRatio: 0,
+        timestamp,
+        requestId,
+      });
     } finally {
       closeImageSource(imageBitmap);
     }

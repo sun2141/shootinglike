@@ -49,6 +49,13 @@ model ReferenceVideo {
   playerHeightCm      Float?
   cameraAngle         String?
   calibrationFactor   Float
+  // Quality of the app-side measurement that produced `measuredSpeedKmh`.
+  // Relative 1-sigma uncertainty (0..1) and its grade, as reported by the
+  // analysis pipeline. NULL means the row predates quality tracking and is
+  // therefore not trusted for calibration.
+  measurementUncertainty Float?
+  measurementGrade       String?
+  trajectoryPoints       Int?
   isActive            Boolean  @default(true)
   notes               String?
   createdAt           DateTime @default(now())

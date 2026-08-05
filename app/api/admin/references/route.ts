@@ -68,6 +68,11 @@ function validateReferencePayload(body: Record<string, unknown>) {
   const playerHeightCm = parseOptionalNumber(body.playerHeightCm);
   const sourceSizeBytes = parseOptionalNumber(body.sourceSizeBytes);
   const sourceUrl = sanitizeSourceUrl(body.sourceUrl);
+  const measurementUncertainty = parseOptionalNumber(body.measurementUncertainty);
+  const trajectoryPoints = parseOptionalInteger(body.trajectoryPoints);
+  const rawGrade = typeof body.measurementGrade === "string" ? body.measurementGrade.toLowerCase() : null;
+  const measurementGrade =
+    rawGrade === "high" || rawGrade === "medium" || rawGrade === "low" ? rawGrade : null;
 
   if (knownSpeedKmh === null || measuredSpeedKmh === null) {
     return { error: "Known speed and measured speed are required." };
@@ -130,6 +135,10 @@ function validateReferencePayload(body: Record<string, unknown>) {
     return { error: "Player height must be between 120 and 220 cm." };
   }
 
+  if (measurementUncertainty !== null && (measurementUncertainty <= 0 || measurementUncertainty > 5)) {
+    return { error: "Measurement uncertainty must be a positive relative value." };
+  }
+
   const sample: ReferenceCalibrationSample = {
     knownSpeedKmh,
     measuredSpeedKmh,
@@ -174,6 +183,9 @@ function validateReferencePayload(body: Record<string, unknown>) {
       cameraAngle: sanitizeText(body.cameraAngle, 80),
       notes: sanitizeText(body.notes, MAX_NOTES_LENGTH),
       calibrationFactor,
+      measurementUncertainty,
+      measurementGrade,
+      trajectoryPoints,
       isActive: body.isActive !== false,
     },
   };

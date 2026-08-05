@@ -15,80 +15,19 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { drawLandmarks, drawConnectors } from "@/lib/canvas-utils";
-import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
-import { estimateSpeedKmhFromSeconds } from "@/lib/analysis/speed";
-import { calculateFormScore, type FormResult } from "@/lib/analysis/form";
-import { generateFeedback } from "@/lib/analysis/feedback";
-import {
-  applyReferenceCalibration,
-  estimateReferenceDistanceMeters,
-  type ReferenceCalibrationSummary,
-} from "@/lib/analysis/reference-calibration";
+import { type ReferenceCalibrationSummary } from "@/lib/analysis/reference-calibration";
 import { getAnalysisFrameSize } from "@/lib/analysis/frame-size";
-import { calculateDistance, type Point } from "@/lib/analysis/math";
+import { runVideoAnalysis, DEFAULT_PLAYER_HEIGHT_CM } from "@/lib/analysis/pipeline/run-analysis";
+import { VisionWorkers } from "@/lib/analysis/pipeline/vision-workers";
+import type { PipelineResult } from "@/lib/analysis/pipeline/types";
 import { ShareCard } from "@/components/ShareCard";
 import html2canvas from "html2canvas";
 
 const MAX_CLIENT_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
-const FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND = 300;
-const BALL_VELOCITY_THRESHOLD_PX_PER_SECOND = 220;
-const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 650;
-const MAX_TRAJECTORY_POINTS = 90;
-const VIDEO_READY_TIMEOUT_MS = 12000;
-const ANALYSIS_SAMPLE_FPS = 20;
-const MAX_ANALYSIS_SECONDS = 14;
-const MAX_ANALYSIS_FRAMES = 280;
-const FRAME_WORKER_TIMEOUT_MS = 7000;
 const OPT_IN_STORAGE_KEY = "freekickDataOptIn";
 const PLAYER_HEIGHT_STORAGE_KEY = "freekickPlayerHeightCm";
-const DEFAULT_PLAYER_HEIGHT_CM = 175;
 const DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO = 16 / 9;
 const MOBILE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
-
-type FootSide = "left" | "right";
-type Confidence = "high" | "partial" | "failed";
-type WorkerFrame = ImageBitmap | ImageData;
-
-interface AnalysisResult {
-  framesAnalyzed: number;
-  estimatedSpeedKmh: number;
-  rawSpeedKmh?: number;
-  estimatedDistanceMeters?: number;
-  ballDisplacementPx?: number;
-  kickerHeightPx?: number;
-  formResult: FormResult;
-  feedbacks: string[];
-  kickType: string;
-  confidence: Confidence;
-  referenceCalibration?: {
-    factor: number;
-    sampleCount: number;
-  };
-  referenceDistance?: {
-    metersPerPixel: number;
-    sampleCount: number;
-  };
-}
-
-interface TimedPoint extends Point {
-  timeMs: number;
-}
-
-interface BallPrediction {
-  bbox: number[];
-  score?: number;
-  class?: string;
-  source?: "motion";
-}
-
-interface VisionWorkerMessage {
-  type: "INIT_SUCCESS" | "INIT_ERROR" | "DETECT_RESULT";
-  error?: string;
-  requestId?: number;
-  timestamp?: number;
-  landmarks?: NormalizedLandmark[][];
-  balls?: BallPrediction[];
-}
 
 const POSE_CONNECTIONS: Array<{ start: number; end: number }> = [
   { start: 0, end: 1 },
@@ -128,132 +67,11 @@ const POSE_CONNECTIONS: Array<{ start: number; end: number }> = [
   { start: 28, end: 32 },
 ];
 
-const PLANT_LANDMARKS_BY_KICKING_FOOT: Record<
-  FootSide,
-  { hip: number; knee: number; ankle: number; shoulder: number }
-> = {
-  left: { hip: 24, knee: 26, ankle: 28, shoulder: 12 },
-  right: { hip: 23, knee: 25, ankle: 27, shoulder: 11 },
+const GRADE_LABEL: Record<string, string> = {
+  high: "높음",
+  medium: "보통",
+  low: "낮음",
 };
-
-function isVisible(landmark: NormalizedLandmark | undefined): landmark is NormalizedLandmark {
-  return Boolean(landmark && (landmark.visibility === undefined || landmark.visibility > 0.5));
-}
-
-function toCanvasPoint(
-  landmark: NormalizedLandmark | undefined,
-  canvas: HTMLCanvasElement
-): Point | null {
-  if (!isVisible(landmark)) return null;
-  return {
-    x: landmark.x * canvas.width,
-    y: landmark.y * canvas.height,
-  };
-}
-
-function getBallCenter(ball: BallPrediction): Point | null {
-  if (!ball.bbox || ball.bbox.length < 4) return null;
-  const [x, y, width, height] = ball.bbox;
-  if (![x, y, width, height].every(Number.isFinite)) return null;
-  return {
-    x: x + width / 2,
-    y: y + height / 2,
-  };
-}
-
-function selectBallCandidate(
-  balls: BallPrediction[],
-  activeFoot: Point | null,
-  previousBall: Point | null,
-  canvas: HTMLCanvasElement,
-  hasImpactStarted: boolean
-): BallPrediction | null {
-  let selected: BallPrediction | null = null;
-  let selectedScore = Number.NEGATIVE_INFINITY;
-  const preImpactFootRadius = Math.max(90, Math.min(260, canvas.width * 0.24));
-  const activeTrackIsNearFoot =
-    !activeFoot || !previousBall || calculateDistance(previousBall, activeFoot) < preImpactFootRadius * 1.2;
-
-  for (const ball of balls) {
-    const center = getBallCenter(ball);
-    if (!center) continue;
-
-    const [x, y, width, height] = ball.bbox;
-    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) continue;
-
-    const maxSide = Math.max(width, height);
-    const minSide = Math.min(width, height);
-    const aspect = maxSide / Math.max(minSide, 1);
-    const distToFoot = activeFoot ? calculateDistance(center, activeFoot) : Number.POSITIVE_INFINITY;
-
-    if (!hasImpactStarted && activeFoot && !activeTrackIsNearFoot && distToFoot > preImpactFootRadius) {
-      continue;
-    }
-
-    if (!hasImpactStarted && activeFoot && !previousBall && distToFoot > preImpactFootRadius) {
-      continue;
-    }
-
-    const modelScore = ball.score ?? 0.5;
-    const previousDistancePenalty = previousBall
-      ? Math.min(1.8, calculateDistance(center, previousBall) / Math.max(110, canvas.width * 0.14))
-      : 0;
-    const footDistancePenalty =
-      activeFoot && !hasImpactStarted ? Math.min(1.4, distToFoot / preImpactFootRadius) : 0;
-    const footProximityBonus =
-      activeFoot && !hasImpactStarted ? Math.max(0, 0.9 * (1 - distToFoot / preImpactFootRadius)) : 0;
-    const largeMotionPenalty = Math.max(0, (maxSide - Math.max(44, canvas.width * 0.065)) / Math.max(60, canvas.width * 0.08));
-    const shapePenalty = Math.max(0, aspect - 1.8) * 0.25;
-    const rankingScore =
-      modelScore + footProximityBonus - previousDistancePenalty - footDistancePenalty - largeMotionPenalty - shapePenalty;
-
-    if (rankingScore > selectedScore) {
-      selected = ball;
-      selectedScore = rankingScore;
-    }
-  }
-
-  return selected;
-}
-
-function waitForVideoSeek(video: HTMLVideoElement, timeSeconds: number): Promise<void> {
-  const targetTime = Math.max(0, Math.min(timeSeconds, Number.isFinite(video.duration) ? video.duration : timeSeconds));
-  if (Math.abs(video.currentTime - targetTime) < 0.015 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => {
-      video.removeEventListener("seeked", handleSeeked);
-      video.removeEventListener("error", handleError);
-      window.clearTimeout(timeoutId);
-    };
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) reject(error);
-      else resolve();
-    };
-    const handleSeeked = () => finish();
-    const handleError = () => finish(new Error("Video seek failed."));
-    const timeoutId = window.setTimeout(() => finish(new Error("Video seek timed out.")), 5000);
-
-    video.addEventListener("seeked", handleSeeked);
-    video.addEventListener("error", handleError);
-
-    try {
-      if ("fastSeek" in video && typeof video.fastSeek === "function") {
-        video.fastSeek(targetTime);
-      } else {
-        video.currentTime = targetTime;
-      }
-    } catch (error) {
-      finish(error instanceof Error ? error : new Error("Video seek failed."));
-    }
-  });
-}
 
 function getOrCreateDeviceId(): string {
   const existing = localStorage.getItem("deviceId");
@@ -266,99 +84,6 @@ function getOrCreateDeviceId(): string {
   const deviceId = `device_${suffix}`;
   localStorage.setItem("deviceId", deviceId);
   return deviceId;
-}
-
-function waitForVideoData(video: HTMLVideoElement, timeoutMs = VIDEO_READY_TIMEOUT_MS): Promise<void> {
-  const hasCurrentFrame = () => video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
-  if (hasCurrentFrame()) return Promise.resolve();
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => {
-      video.removeEventListener("loadeddata", handleLoaded);
-      video.removeEventListener("canplay", handleLoaded);
-      video.removeEventListener("canplaythrough", handleLoaded);
-      video.removeEventListener("error", handleError);
-      window.clearTimeout(timeoutId);
-    };
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) reject(error);
-      else resolve();
-    };
-    const handleLoaded = () => {
-      if (!hasCurrentFrame()) return;
-      finish();
-    };
-    const handleError = () => {
-      finish(new Error("Video data could not be loaded."));
-    };
-    const timeoutId = window.setTimeout(() => {
-      finish(new Error("Video data load timed out."));
-    }, timeoutMs);
-
-    video.addEventListener("loadeddata", handleLoaded);
-    video.addEventListener("canplay", handleLoaded);
-    video.addEventListener("canplaythrough", handleLoaded);
-    video.addEventListener("error", handleError);
-
-    try {
-      video.load();
-    } catch {
-      // Some browsers throw when load() is called on transient blob URLs.
-    }
-
-    if (hasCurrentFrame()) {
-      finish();
-    }
-  });
-}
-
-async function createWorkerFrame(
-  video: HTMLVideoElement,
-  fallbackCanvas: HTMLCanvasElement,
-  targetWidth: number,
-  targetHeight: number
-): Promise<WorkerFrame> {
-  const width = targetWidth || video.videoWidth || video.clientWidth;
-  const height = targetHeight || video.videoHeight || video.clientHeight;
-  if (width <= 0 || height <= 0) {
-    throw new Error("Video frame has no drawable dimensions.");
-  }
-
-  if (fallbackCanvas.width !== width) fallbackCanvas.width = width;
-  if (fallbackCanvas.height !== height) fallbackCanvas.height = height;
-
-  const ctx = fallbackCanvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("Could not create frame capture canvas.");
-
-  ctx.drawImage(video, 0, 0, width, height);
-
-  if (typeof createImageBitmap === "function") {
-    try {
-      return await createImageBitmap(fallbackCanvas);
-    } catch {
-      // Fall through to ImageData for browsers without transferable ImageBitmap support.
-    }
-  }
-
-  return ctx.getImageData(0, 0, width, height);
-}
-
-function closeWorkerFrame(frame: WorkerFrame | null) {
-  if (frame && "close" in frame && typeof frame.close === "function") {
-    frame.close();
-  }
-}
-
-function getFrameTransferList(frame: WorkerFrame): Transferable[] {
-  if ("close" in frame) {
-    return [frame];
-  }
-
-  return [];
 }
 
 function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -374,27 +99,23 @@ export default function AnalyzePage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoPreviewAspectRatio, setVideoPreviewAspectRatio] = useState(DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO);
   const [videoPreviewError, setVideoPreviewError] = useState<string | null>(null);
-  const [isPoseLoading, setIsPoseLoading] = useState(true);
-  const [isBallLoading, setIsBallLoading] = useState(true);
+  const [isModelLoading, setIsModelLoading] = useState(true);
   const [modelError, setModelError] = useState<string | null>(null);
-  const isModelLoading = isPoseLoading || isBallLoading;
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
-  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<PipelineResult | null>(null);
   const [impactDetected, setImpactDetected] = useState(false);
   const [isPersistingAnalysis, setIsPersistingAnalysis] = useState(false);
   const [referenceCalibration, setReferenceCalibration] = useState<ReferenceCalibrationSummary | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const poseWorkerRef = useRef<Worker | null>(null);
-  const ballWorkerRef = useRef<Worker | null>(null);
+  const workersRef = useRef<VisionWorkers | null>(null);
   const shareCardRef = useRef<HTMLDivElement>(null);
-  const animationFrameRef = useRef<number | null>(null);
   const videoUrlRef = useRef<string | null>(null);
-  const frameCaptureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const referenceCalibrationRef = useRef<ReferenceCalibrationSummary | null>(null);
+  const analysisRunIdRef = useRef(0);
 
   const [isSharing, setIsSharing] = useState(false);
   const [optIn, setOptIn] = useState(() => {
@@ -413,59 +134,15 @@ export default function AnalyzePage() {
       return DEFAULT_PLAYER_HEIGHT_CM.toString();
     }
   });
+  const [playerHeightProvided, setPlayerHeightProvided] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return localStorage.getItem(PLAYER_HEIGHT_STORAGE_KEY) !== null;
+    } catch {
+      return false;
+    }
+  });
   const [videoFile, setVideoFile] = useState<File | null>(null);
-
-  const prevFootSamplesRef = useRef<Record<string, TimedPoint>>({});
-  const prevBallSampleRef = useRef<TimedPoint | null>(null);
-
-  const isPoseProcessingRef = useRef(false);
-  const isBallProcessingRef = useRef(false);
-  const analysisRunIdRef = useRef(0);
-  const frameRequestIdRef = useRef(0);
-  const pendingPoseRequestIdRef = useRef<number | null>(null);
-  const pendingBallRequestIdRef = useRef<number | null>(null);
-
-  const frameCounterRef = useRef(0);
-  const impactFrameIndexRef = useRef(-1);
-  const impactTimeMsRef = useRef<number | null>(null);
-  const activeFootPosRef = useRef<Point | null>(null);
-  const activeFootSideRef = useRef<FootSide | null>(null);
-  const nosePosRef = useRef<Point | null>(null);
-  const anklePosRef = useRef<Point | null>(null);
-  const formResultRef = useRef<FormResult | null>(null);
-
-  const ballStartPosRef = useRef<Point | null>(null);
-  const ballStartTimeMsRef = useRef<number | null>(null);
-  const ballEndPosRef = useRef<Point | null>(null);
-  const ballEndTimeMsRef = useRef<number | null>(null);
-  const ballTrajectoryRef = useRef<Point[]>([]);
-  const poseDetectionsRef = useRef(0);
-  const ballDetectionsRef = useRef(0);
-
-  const resetTrackingRefs = useCallback(() => {
-    prevFootSamplesRef.current = {};
-    prevBallSampleRef.current = null;
-    isPoseProcessingRef.current = false;
-    isBallProcessingRef.current = false;
-    pendingPoseRequestIdRef.current = null;
-    pendingBallRequestIdRef.current = null;
-    ballTrajectoryRef.current = [];
-
-    frameCounterRef.current = 0;
-    impactFrameIndexRef.current = -1;
-    impactTimeMsRef.current = null;
-    activeFootPosRef.current = null;
-    activeFootSideRef.current = null;
-    nosePosRef.current = null;
-    anklePosRef.current = null;
-    formResultRef.current = null;
-    ballStartPosRef.current = null;
-    ballStartTimeMsRef.current = null;
-    ballEndPosRef.current = null;
-    ballEndTimeMsRef.current = null;
-    poseDetectionsRef.current = 0;
-    ballDetectionsRef.current = 0;
-  }, []);
 
   const revokeCurrentVideoUrl = useCallback(() => {
     if (videoUrlRef.current) {
@@ -491,171 +168,50 @@ export default function AnalyzePage() {
     setVideoPreviewError(null);
   }, []);
 
-  const processPoseResult = useCallback((landmarks: NormalizedLandmark[][], timestampMs: number) => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!ctx || !canvas || landmarks.length === 0) return;
+  useEffect(() => {
+    let disposed = false;
+    let workers: VisionWorkers | null = null;
 
-    poseDetectionsRef.current += 1;
-    const footLandmarks: Array<{ side: FootSide; index: number }> = [
-      { side: "left", index: 31 },
-      { side: "right", index: 32 },
-    ];
-    let fastestFoot:
-      | {
-          side: FootSide;
-          point: Point;
-          velocityPxPerSecond: number;
-          landmark: NormalizedLandmark[];
-        }
-      | null = null;
+    try {
+      workers = new VisionWorkers();
+      workersRef.current = workers;
+    } catch (error) {
+      console.error("Worker creation failed", error);
+      queueMicrotask(() => {
+        if (disposed) return;
+        setModelError("브라우저에서 분석 워커를 시작하지 못했습니다.");
+        setIsModelLoading(false);
+      });
+      return () => {
+        disposed = true;
+      };
+    }
 
-    for (const [poseIndex, landmark] of landmarks.entries()) {
-      drawLandmarks(ctx, landmark);
-      drawConnectors(ctx, landmark, POSE_CONNECTIONS, {
-        color: "rgba(0, 255, 0, 0.7)",
-        lineWidth: 3,
+    workers.ready
+      .then(() => {
+        if (!disposed) setIsModelLoading(false);
+      })
+      .catch((error: Error) => {
+        if (disposed) return;
+        console.error("Model init failed", error);
+        setModelError("분석 모델을 불러오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
+        setIsModelLoading(false);
       });
 
-      for (const foot of footLandmarks) {
-        const point = toCanvasPoint(landmark[foot.index], canvas);
-        if (!point) continue;
-
-        const footKey = `${poseIndex}:${foot.side}`;
-        const previous = prevFootSamplesRef.current[footKey];
-        if (previous) {
-          const dtSeconds = Math.max((timestampMs - previous.timeMs) / 1000, 1 / 120);
-          const velocityPxPerSecond = calculateDistance(point, previous) / dtSeconds;
-          const activeFoot = activeFootPosRef.current;
-          const switchPenalty = activeFoot ? Math.min(220, calculateDistance(point, activeFoot) * 0.25) : 0;
-          const rankingVelocity = velocityPxPerSecond - switchPenalty;
-
-          if (!fastestFoot || rankingVelocity > fastestFoot.velocityPxPerSecond) {
-            fastestFoot = {
-              side: foot.side,
-              point,
-              velocityPxPerSecond: rankingVelocity,
-              landmark,
-            };
-          }
-        }
-
-        prevFootSamplesRef.current[footKey] = {
-          ...point,
-          timeMs: timestampMs,
-        };
-      }
-    }
-
-    if (
-      fastestFoot &&
-      fastestFoot.velocityPxPerSecond > FOOT_VELOCITY_THRESHOLD_PX_PER_SECOND
-    ) {
-      const plant = PLANT_LANDMARKS_BY_KICKING_FOOT[fastestFoot.side];
-      const landmark = fastestFoot.landmark;
-      const nose = toCanvasPoint(landmark[0], canvas);
-      const plantHip = toCanvasPoint(landmark[plant.hip], canvas);
-      const plantKnee = toCanvasPoint(landmark[plant.knee], canvas);
-      const plantAnkle = toCanvasPoint(landmark[plant.ankle], canvas);
-      const plantShoulder = toCanvasPoint(landmark[plant.shoulder], canvas);
-
-      activeFootPosRef.current = fastestFoot.point;
-      activeFootSideRef.current = fastestFoot.side;
-      if (nose) nosePosRef.current = nose;
-      if (plantAnkle) anklePosRef.current = plantAnkle;
-
-      if (plantHip && plantKnee && plantAnkle && plantShoulder) {
-        formResultRef.current = calculateFormScore(plantHip, plantKnee, plantAnkle, plantShoulder);
-      }
-    } else if (fastestFoot) {
-      activeFootPosRef.current = fastestFoot.point;
-      activeFootSideRef.current = fastestFoot.side;
-    }
-  }, []);
-
-  const processBallResult = useCallback((balls: BallPrediction[], timestampMs: number) => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!ctx || !canvas || balls.length === 0) return;
-
-    const ball = selectBallCandidate(
-      balls,
-      activeFootPosRef.current,
-      prevBallSampleRef.current,
-      canvas,
-      impactTimeMsRef.current !== null
-    );
-    if (!ball) return;
-
-    const center = getBallCenter(ball);
-    if (!center || ball.bbox.length < 4) return;
-
-    ballDetectionsRef.current += 1;
-
-    const [x, y, width, height] = ball.bbox;
-    ctx.strokeStyle = "rgba(4, 217, 255, 0.9)";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x, y, width, height);
-
-    ballTrajectoryRef.current.push(center);
-    if (ballTrajectoryRef.current.length > MAX_TRAJECTORY_POINTS) {
-      ballTrajectoryRef.current.shift();
-    }
-
-    ctx.beginPath();
-    ctx.strokeStyle = "rgba(255, 165, 0, 0.5)";
-    ctx.lineWidth = 2;
-    ballTrajectoryRef.current.forEach((point, index) => {
-      if (index === 0) ctx.moveTo(point.x, point.y);
-      else ctx.lineTo(point.x, point.y);
-    });
-    ctx.stroke();
-
-    const previous = prevBallSampleRef.current;
-    if (previous) {
-      const dtSeconds = Math.max((timestampMs - previous.timeMs) / 1000, 1 / 120);
-      const ballVelocityPxPerSecond = calculateDistance(center, previous) / dtSeconds;
-
-      if (
-        ballVelocityPxPerSecond > BALL_VELOCITY_THRESHOLD_PX_PER_SECOND &&
-        impactFrameIndexRef.current === -1
-      ) {
-        const activeFoot = activeFootPosRef.current;
-        const distToFoot = activeFoot ? calculateDistance(center, activeFoot) : Number.POSITIVE_INFINITY;
-        const previousDistToFoot = activeFoot ? calculateDistance(previous, activeFoot) : Number.POSITIVE_INFINITY;
-        const impactDistanceThreshold = Math.max(100, Math.min(260, canvas.width * 0.22));
-        const hasFootConfirmation =
-          activeFoot ? Math.min(distToFoot, previousDistToFoot) < impactDistanceThreshold : false;
-        const hasStrongBallConfirmation =
-          !activeFoot &&
-          ballDetectionsRef.current >= 3 &&
-          ballVelocityPxPerSecond > BALL_VELOCITY_THRESHOLD_PX_PER_SECOND * 1.6;
-
-        if (hasFootConfirmation || hasStrongBallConfirmation) {
-          setImpactDetected(true);
-          impactFrameIndexRef.current = frameCounterRef.current;
-          impactTimeMsRef.current = timestampMs;
-          ballStartPosRef.current = { x: previous.x, y: previous.y };
-          ballStartTimeMsRef.current = previous.timeMs;
-        }
-      }
-    }
-
-    if (
-      impactTimeMsRef.current !== null &&
-      timestampMs <= impactTimeMsRef.current + BALL_TRACKING_WINDOW_AFTER_IMPACT_MS &&
-      ballStartTimeMsRef.current !== null &&
-      timestampMs > ballStartTimeMsRef.current
-    ) {
-      ballEndPosRef.current = center;
-      ballEndTimeMsRef.current = timestampMs;
-    }
-
-    prevBallSampleRef.current = {
-      ...center,
-      timeMs: timestampMs,
+    return () => {
+      disposed = true;
+      analysisRunIdRef.current += 1;
+      workers?.terminate();
+      workersRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      analysisRunIdRef.current += 1;
+      revokeCurrentVideoUrl();
+    };
+  }, [revokeCurrentVideoUrl]);
 
   useEffect(() => {
     try {
@@ -672,100 +228,6 @@ export default function AnalyzePage() {
       // Ignore storage failures; the current state remains usable.
     }
   }, [playerHeightCm]);
-
-  useEffect(() => {
-    let disposed = false;
-
-    try {
-      poseWorkerRef.current = new Worker(new URL("../../lib/workers/pose.worker.ts", import.meta.url));
-      ballWorkerRef.current = new Worker(new URL("../../lib/workers/ball.worker.ts", import.meta.url));
-    } catch (error) {
-      console.error("Worker creation failed", error);
-      queueMicrotask(() => {
-        if (disposed) return;
-        setModelError("브라우저에서 분석 워커를 시작하지 못했습니다.");
-        setIsPoseLoading(false);
-        setIsBallLoading(false);
-      });
-      return () => {
-        disposed = true;
-      };
-    }
-
-    poseWorkerRef.current.onmessage = (e: MessageEvent<VisionWorkerMessage>) => {
-      if (disposed) return;
-      const { type, landmarks = [], requestId, timestamp = performance.now(), error } = e.data;
-
-      if (type === "INIT_SUCCESS") {
-        setIsPoseLoading(false);
-      } else if (type === "INIT_ERROR") {
-        console.error("Pose Worker init error", error);
-        setModelError("자세 분석 모델을 불러오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
-        setIsPoseLoading(false);
-      } else if (type === "DETECT_RESULT") {
-        if (requestId === undefined || requestId !== pendingPoseRequestIdRef.current) return;
-        pendingPoseRequestIdRef.current = null;
-        isPoseProcessingRef.current = false;
-        processPoseResult(landmarks, timestamp);
-      }
-    };
-
-    ballWorkerRef.current.onmessage = (e: MessageEvent<VisionWorkerMessage>) => {
-      if (disposed) return;
-      const { type, balls = [], requestId, timestamp = performance.now(), error } = e.data;
-
-      if (type === "INIT_SUCCESS") {
-        setIsBallLoading(false);
-      } else if (type === "INIT_ERROR") {
-        console.error("Ball Worker init error", error);
-        setModelError("공 추적 모델을 불러오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
-        setIsBallLoading(false);
-      } else if (type === "DETECT_RESULT") {
-        if (requestId === undefined || requestId !== pendingBallRequestIdRef.current) return;
-        pendingBallRequestIdRef.current = null;
-        isBallProcessingRef.current = false;
-        processBallResult(balls, timestamp);
-      }
-    };
-
-    poseWorkerRef.current.postMessage({ type: "INIT" });
-    ballWorkerRef.current.postMessage({ type: "INIT" });
-
-    return () => {
-      disposed = true;
-      poseWorkerRef.current?.terminate();
-      ballWorkerRef.current?.terminate();
-      poseWorkerRef.current = null;
-      ballWorkerRef.current = null;
-    };
-  }, [processBallResult, processPoseResult]);
-
-  useEffect(() => {
-    return () => {
-      analysisRunIdRef.current += 1;
-      if (animationFrameRef.current !== null) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-      revokeCurrentVideoUrl();
-    };
-  }, [revokeCurrentVideoUrl]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!videoUrl || !video) return;
-
-    const frameId = requestAnimationFrame(() => {
-      try {
-        video.load();
-      } catch {
-        // Mobile browsers may reject explicit loads for transient blob URLs.
-      }
-    });
-
-    return () => {
-      cancelAnimationFrame(frameId);
-    };
-  }, [videoUrl]);
 
   useEffect(() => {
     referenceCalibrationRef.current = referenceCalibration;
@@ -790,7 +252,7 @@ export default function AnalyzePage() {
   }, []);
 
   const persistAnalysis = useCallback(
-    async (result: AnalysisResult) => {
+    async (result: PipelineResult) => {
       if (result.estimatedSpeedKmh <= 0 || result.confidence === "failed") return;
 
       try {
@@ -849,11 +311,7 @@ export default function AnalyzePage() {
       }
 
       analysisRunIdRef.current += 1;
-      if (animationFrameRef.current !== null) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
       revokeCurrentVideoUrl();
-      resetTrackingRefs();
 
       const nextUrl = URL.createObjectURL(file);
       videoUrlRef.current = nextUrl;
@@ -866,20 +324,15 @@ export default function AnalyzePage() {
       setVideoPreviewError(null);
       setIsAnalyzing(false);
       setIsPersistingAnalysis(false);
-      ballWorkerRef.current?.postMessage({ type: "RESET" });
+      workersRef.current?.reset();
     },
-    [resetTrackingRefs, revokeCurrentVideoUrl]
+    [revokeCurrentVideoUrl]
   );
 
   const resetVideo = useCallback(() => {
     analysisRunIdRef.current += 1;
-    if (animationFrameRef.current !== null) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
     videoRef.current?.pause();
     revokeCurrentVideoUrl();
-    resetTrackingRefs();
     setVideoFile(null);
     setVideoUrl(null);
     setVideoPreviewAspectRatio(DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO);
@@ -889,339 +342,112 @@ export default function AnalyzePage() {
     setAnalysisProgress(0);
     setIsAnalyzing(false);
     setIsPersistingAnalysis(false);
-    ballWorkerRef.current?.postMessage({ type: "RESET" });
-  }, [resetTrackingRefs, revokeCurrentVideoUrl]);
+    workersRef.current?.reset();
+  }, [revokeCurrentVideoUrl]);
 
   const reloadForAnotherVideo = useCallback(() => {
     if (isPersistingAnalysis) return;
     analysisRunIdRef.current += 1;
-    if (animationFrameRef.current !== null) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
     videoRef.current?.pause();
-    ballWorkerRef.current?.postMessage({ type: "RESET" });
+    workersRef.current?.reset();
     revokeCurrentVideoUrl();
-    resetTrackingRefs();
     window.location.reload();
-  }, [isPersistingAnalysis, resetTrackingRefs, revokeCurrentVideoUrl]);
-
-  const buildFinalResult = useCallback((): AnalysisResult => {
-    const formResult = formResultRef.current;
-    const ballStartPos = ballStartPosRef.current;
-    const ballEndPos = ballEndPosRef.current;
-    const ballStartTimeMs = ballStartTimeMsRef.current;
-    const ballEndTimeMs = ballEndTimeMsRef.current;
-    const nosePos = nosePosRef.current;
-    const anklePos = anklePosRef.current;
-    const hasCompleteSpeedData =
-      impactFrameIndexRef.current !== -1 &&
-      ballStartPos &&
-      ballEndPos &&
-      ballStartTimeMs !== null &&
-      ballEndTimeMs !== null &&
-      nosePos &&
-      anklePos;
-
-    let finalSpeed = 0;
-    let rawSpeed = 0;
-    let estimatedDistanceMeters: number | undefined;
-    let ballDisplacementPx: number | undefined;
-    let kickerHeightPx: number | undefined;
-    let confidence: Confidence = "failed";
-    let finalFormResult: FormResult = formResult ?? { score: 0, kneeAngle: 0, torsoLeanAngle: 0 };
-    let feedbacks: string[] = [
-      "임팩트를 명확히 찾지 못했습니다. 공과 전신이 잘 보이는 짧은 영상을 다시 업로드해 주세요.",
-    ];
-    let appliedReferenceCalibration: AnalysisResult["referenceCalibration"];
-    let appliedReferenceDistance: AnalysisResult["referenceDistance"];
-
-    if (hasCompleteSpeedData) {
-      const elapsedSeconds = (ballEndTimeMs - ballStartTimeMs) / 1000;
-      const parsedHeightCm = Number.parseFloat(playerHeightCm);
-      const playerHeightM =
-        Number.isFinite(parsedHeightCm)
-          ? Math.min(2.2, Math.max(1.2, parsedHeightCm / 100))
-          : DEFAULT_PLAYER_HEIGHT_CM / 100;
-      ballDisplacementPx = calculateDistance(ballStartPos, ballEndPos);
-      kickerHeightPx = calculateDistance(nosePos, anklePos);
-      rawSpeed = estimateSpeedKmhFromSeconds(
-        nosePos,
-        anklePos,
-        ballStartPos,
-        ballEndPos,
-        elapsedSeconds,
-        playerHeightM
-      );
-      finalSpeed = applyReferenceCalibration(rawSpeed, referenceCalibrationRef.current);
-      estimatedDistanceMeters = estimateReferenceDistanceMeters(ballDisplacementPx, referenceCalibrationRef.current) ?? undefined;
-
-      if (finalSpeed > 0) {
-        confidence = "high";
-        if (formResult) {
-          finalFormResult = formResult;
-          feedbacks = generateFeedback(formResult, finalSpeed);
-        } else {
-          feedbacks = [
-            "공 이동 구간을 기준으로 구속을 산출했습니다.",
-            "자세 기준점이 부족해 폼 점수는 보수적으로 표시했습니다.",
-          ];
-        }
-        const referenceFeedbacks: string[] = [];
-
-        if (referenceCalibrationRef.current?.enabled && referenceCalibrationRef.current.sampleCount > 0) {
-          appliedReferenceCalibration = {
-            factor: referenceCalibrationRef.current.factor,
-            sampleCount: referenceCalibrationRef.current.sampleCount,
-          };
-          referenceFeedbacks.push(
-            `레퍼런스 영상 ${referenceCalibrationRef.current.sampleCount}개 기준으로 구속을 보정했습니다.`
-          );
-        }
-
-        if (
-          estimatedDistanceMeters !== undefined &&
-          referenceCalibrationRef.current?.distanceEnabled &&
-          referenceCalibrationRef.current.metersPerPixel
-        ) {
-          appliedReferenceDistance = {
-            metersPerPixel: referenceCalibrationRef.current.metersPerPixel,
-            sampleCount: referenceCalibrationRef.current.distanceSampleCount,
-          };
-          referenceFeedbacks.push(
-            `레퍼런스 거리 기준으로 공 이동거리를 ${estimatedDistanceMeters.toFixed(1)}m로 추정했습니다.`
-          );
-        }
-
-        if (referenceFeedbacks.length > 0) {
-          feedbacks = [...referenceFeedbacks, ...feedbacks];
-        }
-      }
-    }
-
-    if (confidence === "failed" && formResult) {
-      confidence = "partial";
-      finalFormResult = formResult;
-      feedbacks = [
-        "자세는 분석했지만 공의 이동 구간이 짧아 구속은 산출하지 않았습니다.",
-        ...generateFeedback(formResult, 0).slice(0, 2),
-      ];
-    }
-
-    if (confidence === "failed" && ballDetectionsRef.current > 0) {
-      confidence = "partial";
-      feedbacks = [
-        `공 후보 ${ballDetectionsRef.current}개 프레임을 추적했지만, 전신 기준점이 부족해 구속은 산출하지 않았습니다.`,
-        "공과 키커 전신이 같은 화면에 더 크게 보이도록 촬영하면 속도 산출이 안정적입니다.",
-      ];
-    }
-
-    const kickType =
-      activeFootSideRef.current === "left"
-        ? "Left-foot Instep"
-        : activeFootSideRef.current === "right"
-          ? "Right-foot Instep"
-          : "Instep Power";
-
-    return {
-      framesAnalyzed: frameCounterRef.current,
-      estimatedSpeedKmh: finalSpeed,
-      rawSpeedKmh: rawSpeed || undefined,
-      estimatedDistanceMeters,
-      ballDisplacementPx,
-      kickerHeightPx,
-      formResult: finalFormResult,
-      feedbacks,
-      kickType,
-      confidence,
-      referenceCalibration: appliedReferenceCalibration,
-      referenceDistance: appliedReferenceDistance,
-    };
-  }, [playerHeightCm]);
-
-  const waitForWorkerFrame = useCallback((runId: number): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const startedAt = performance.now();
-
-      const check = () => {
-        if (analysisRunIdRef.current !== runId) {
-          resolve(false);
-          return;
-        }
-
-        if (pendingPoseRequestIdRef.current === null && pendingBallRequestIdRef.current === null) {
-          resolve(true);
-          return;
-        }
-
-        if (performance.now() - startedAt > FRAME_WORKER_TIMEOUT_MS) {
-          console.warn("Frame analysis timed out");
-          isPoseProcessingRef.current = false;
-          isBallProcessingRef.current = false;
-          pendingPoseRequestIdRef.current = null;
-          pendingBallRequestIdRef.current = null;
-          resolve(false);
-          return;
-        }
-
-        requestAnimationFrame(check);
-      };
-
-      check();
-    });
-  }, []);
+  }, [isPersistingAnalysis, revokeCurrentVideoUrl]);
 
   const startAnalysis = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const poseWorker = poseWorkerRef.current;
-    const ballWorker = ballWorkerRef.current;
+    const workers = workersRef.current;
 
-    if (!video || !canvas || !poseWorker || !ballWorker || isModelLoading || modelError) return;
+    if (!video || !canvas || !workers || isModelLoading || modelError) return;
 
     const runId = analysisRunIdRef.current + 1;
     analysisRunIdRef.current = runId;
-    if (animationFrameRef.current !== null) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
 
-    resetTrackingRefs();
     setAnalysisResult(null);
     setImpactDetected(false);
     setAnalysisProgress(0);
     setIsAnalyzing(true);
 
     try {
-      await waitForVideoData(video);
-      video.pause();
-      video.currentTime = 0;
-      await waitForVideoSeek(video, 0);
-    } catch (error) {
-      console.error("Failed to start video analysis", error);
-      setIsAnalyzing(false);
-      alert("영상 데이터를 불러오지 못했습니다. 짧은 MP4/MOV 파일로 다시 시도해 주세요.");
-      return;
-    }
+      const result = await runVideoAnalysis({
+        video,
+        workers,
+        playerHeightCm: Number.parseFloat(playerHeightCm),
+        playerHeightProvided,
+        calibration: referenceCalibrationRef.current,
+        isCancelled: () => analysisRunIdRef.current !== runId,
+        onProgress: ({ progress }) => {
+          if (analysisRunIdRef.current === runId) setAnalysisProgress(progress);
+        },
+        onFrame: ({ observation, snapshot, frameWidth, frameHeight }) => {
+          if (analysisRunIdRef.current !== runId) return;
 
-    const analysisFrameSize = getAnalysisFrameSize(video);
-    canvas.width = analysisFrameSize.width || video.videoWidth || canvas.clientWidth;
-    canvas.height = analysisFrameSize.height || video.videoHeight || canvas.clientHeight;
-    const frameCaptureCanvas = frameCaptureCanvasRef.current ?? document.createElement("canvas");
-    frameCaptureCanvasRef.current = frameCaptureCanvas;
+          if (canvas.width !== frameWidth) canvas.width = frameWidth;
+          if (canvas.height !== frameHeight) canvas.height = frameHeight;
 
-    const finishAnalysis = () => {
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          for (const landmarks of observation.landmarks) {
+            drawLandmarks(ctx, landmarks);
+            drawConnectors(ctx, landmarks, POSE_CONNECTIONS, {
+              color: "rgba(0, 255, 0, 0.7)",
+              lineWidth: 3,
+            });
+          }
+
+          if (snapshot.ball) {
+            const [x, y, width, height] = snapshot.ball.bbox;
+            ctx.strokeStyle = "rgba(4, 217, 255, 0.9)";
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x, y, width, height);
+          }
+
+          if (snapshot.trail.length > 1) {
+            ctx.beginPath();
+            ctx.strokeStyle = "rgba(255, 165, 0, 0.5)";
+            ctx.lineWidth = 2;
+            snapshot.trail.forEach((point, index) => {
+              if (index === 0) ctx.moveTo(point.x, point.y);
+              else ctx.lineTo(point.x, point.y);
+            });
+            ctx.stroke();
+          }
+
+          if (snapshot.impactJustDetected) setImpactDetected(true);
+        },
+      });
+
       if (analysisRunIdRef.current !== runId) return;
-      setIsAnalyzing(false);
-      isPoseProcessingRef.current = false;
-      isBallProcessingRef.current = false;
-      pendingPoseRequestIdRef.current = null;
-      pendingBallRequestIdRef.current = null;
 
-      const result = buildFinalResult();
+      setIsAnalyzing(false);
+      setImpactDetected(result.impactDetected);
       setAnalysisResult(result);
       setIsPersistingAnalysis(true);
       persistAnalysis(result).finally(() => {
-        if (analysisRunIdRef.current === runId) {
-          setIsPersistingAnalysis(false);
-        }
+        if (analysisRunIdRef.current === runId) setIsPersistingAnalysis(false);
       });
-    };
-
-    const processFrames = async () => {
-      const ctx = canvas.getContext("2d");
-      const sourceDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : MAX_ANALYSIS_SECONDS;
-      const analysisDuration = Math.min(sourceDuration, MAX_ANALYSIS_SECONDS);
-      const sampleInterval = Math.max(1 / ANALYSIS_SAMPLE_FPS, analysisDuration / MAX_ANALYSIS_FRAMES);
-      const totalFrames = Math.max(1, Math.min(MAX_ANALYSIS_FRAMES, Math.floor(analysisDuration / sampleInterval) + 1));
-
-      ballWorker.postMessage({ type: "RESET" });
-
-      for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
-        if (analysisRunIdRef.current !== runId) return;
-
-        const targetTime = Math.min(analysisDuration, frameIndex * sampleInterval);
-        await waitForVideoSeek(video, targetTime);
-
-        if (analysisRunIdRef.current !== runId) return;
-
-        ctx?.clearRect(0, 0, canvas.width, canvas.height);
-        frameCounterRef.current += 1;
-
-        let poseFrame: WorkerFrame | null = null;
-        let ballFrame: WorkerFrame | null = null;
-
-        try {
-          isPoseProcessingRef.current = true;
-          isBallProcessingRef.current = true;
-
-          const timestamp = targetTime * 1000;
-          const frameRequestId = (frameRequestIdRef.current += 1);
-          pendingPoseRequestIdRef.current = frameRequestId;
-          pendingBallRequestIdRef.current = frameRequestId;
-
-          poseFrame = await createWorkerFrame(video, frameCaptureCanvas, canvas.width, canvas.height);
-          ballFrame = await createWorkerFrame(video, frameCaptureCanvas, canvas.width, canvas.height);
-
-          if (analysisRunIdRef.current !== runId) {
-            closeWorkerFrame(poseFrame);
-            closeWorkerFrame(ballFrame);
-            pendingPoseRequestIdRef.current = null;
-            pendingBallRequestIdRef.current = null;
-            return;
-          }
-
-          poseWorker.postMessage(
-            {
-              type: "DETECT",
-              imageBitmap: poseFrame,
-              timestamp,
-              requestId: frameRequestId,
-            },
-            getFrameTransferList(poseFrame)
-          );
-          poseFrame = null;
-
-          ballWorker.postMessage(
-            {
-              type: "DETECT",
-              imageBitmap: ballFrame,
-              timestamp,
-              requestId: frameRequestId,
-            },
-            getFrameTransferList(ballFrame)
-          );
-          ballFrame = null;
-
-          await waitForWorkerFrame(runId);
-        } catch (error) {
-          console.error("Frame dispatch failed", error);
-          closeWorkerFrame(poseFrame);
-          closeWorkerFrame(ballFrame);
-          isPoseProcessingRef.current = false;
-          isBallProcessingRef.current = false;
-          pendingPoseRequestIdRef.current = null;
-          pendingBallRequestIdRef.current = null;
-        }
-
-        setAnalysisProgress(Math.round(((frameIndex + 1) / totalFrames) * 100));
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      }
-
-      finishAnalysis();
-    };
-
-    processFrames().catch((error) => {
-      console.error("Analysis loop failed", error);
+    } catch (error) {
+      console.error("Analysis failed", error);
       if (analysisRunIdRef.current !== runId) return;
       setIsAnalyzing(false);
-      isPoseProcessingRef.current = false;
-      isBallProcessingRef.current = false;
-      pendingPoseRequestIdRef.current = null;
-      pendingBallRequestIdRef.current = null;
       alert("분석 중 오류가 발생했습니다. 다른 영상으로 다시 시도해 주세요.");
-    });
-  }, [buildFinalResult, isModelLoading, modelError, persistAnalysis, resetTrackingRefs, waitForWorkerFrame]);
+    }
+  }, [isModelLoading, modelError, persistAnalysis, playerHeightCm, playerHeightProvided]);
+
+  const triggerDownload = (blob: Blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "freekick-result.png";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const handleShare = async () => {
     if (!shareCardRef.current || !analysisResult || analysisResult.confidence === "failed") return;
@@ -1257,18 +483,8 @@ export default function AnalyzePage() {
     }
   };
 
-  const triggerDownload = (blob: Blob) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "freekick-result.png";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
   const modelStatusText = modelError ? "MODEL ERROR" : isModelLoading ? "LOADING MODELS" : "ANALYSIS READY";
+  const uncertainty = analysisResult?.speedUncertainty ?? null;
 
   return (
     <div className="min-h-screen flex flex-col p-8 relative">
@@ -1299,7 +515,8 @@ export default function AnalyzePage() {
             <div className="bg-white/5 backdrop-blur-sm border border-white/20 rounded-3xl p-8 flex flex-col items-center">
               <h2 className="text-2xl font-bold mb-2">Upload your Freekick Video</h2>
               <p className="text-gray-400 text-sm max-w-sm text-center mb-8">
-                Make sure your full body and the ball are visible. We recommend recording at 60fps or higher.
+                공과 전신이 함께 보이도록, 가급적 <strong className="text-white">측면에서</strong> 60fps 이상으로
+                촬영하세요. 정면 촬영은 구속 정확도가 크게 떨어집니다.
               </p>
 
               <label className="w-full max-w-md mb-6 flex items-center justify-between gap-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3">
@@ -1311,7 +528,10 @@ export default function AnalyzePage() {
                     max="220"
                     inputMode="decimal"
                     value={playerHeightCm}
-                    onChange={(e) => setPlayerHeightCm(e.target.value)}
+                    onChange={(e) => {
+                      setPlayerHeightCm(e.target.value);
+                      setPlayerHeightProvided(true);
+                    }}
                     className="w-24 rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-right text-sm font-bold text-white outline-none focus:border-[var(--color-neon-green)]"
                     aria-label="Player height in centimeters"
                   />
@@ -1432,11 +652,16 @@ export default function AnalyzePage() {
                     <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">ESTIMATED SPEED</div>
                     <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.estimatedSpeedKmh}</div>
                     <div className="text-sm text-[var(--color-neon-green)] mt-2 font-mono font-bold tracking-widest">km/h</div>
+                    {uncertainty && analysisResult.estimatedSpeedKmh > 0 && (
+                      <div className="mt-2 text-xs font-mono text-gray-300">
+                        {uncertainty.lowKmh}–{uncertainty.highKmh} km/h · 신뢰도 {GRADE_LABEL[uncertainty.grade]}
+                      </div>
+                    )}
                     <div className="mt-3 text-[10px] font-mono tracking-widest text-gray-500">
                       {analysisResult.referenceCalibration
                         ? `REF x${analysisResult.referenceCalibration.factor.toFixed(3)}`
-                        : analysisResult.confidence === "high"
-                          ? "TIME-BASED"
+                        : analysisResult.estimatedSpeedKmh > 0
+                          ? `FIT ${analysisResult.trajectoryPoints}PT`
                           : "NOT ENOUGH BALL DATA"}
                     </div>
                     {analysisResult.referenceDistance && analysisResult.estimatedDistanceMeters !== undefined && (
@@ -1451,7 +676,7 @@ export default function AnalyzePage() {
                     <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.formResult.score}</div>
                     <div className="text-sm text-[var(--color-neon-blue)] mt-2 font-mono font-bold tracking-widest">/ 100 pts</div>
                     <div className="mt-3 text-[10px] font-mono tracking-widest text-gray-500">
-                      {analysisResult.framesAnalyzed} FRAMES
+                      {analysisResult.framesAnalyzed} FRAMES · {analysisResult.formResult.source.toUpperCase()}
                     </div>
                   </div>
 
@@ -1468,6 +693,15 @@ export default function AnalyzePage() {
                     </button>
                   </div>
                 </div>
+
+                {uncertainty?.grade === "low" && (
+                  <div className="flex items-start gap-3 rounded-xl border border-yellow-300/30 bg-yellow-300/10 p-4 text-sm text-yellow-100">
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                    <span>
+                      측정 조건이 좋지 않아 이 구속은 참고용입니다. 아래 안내를 반영해 다시 촬영하면 정확도가 올라갑니다.
+                    </span>
+                  </div>
+                )}
 
                 <div className="glass-card p-6 border-t-4 border-t-[var(--color-neon-green)]/50">
                   <h3 className="text-lg font-bold mb-4 flex items-center gap-2">

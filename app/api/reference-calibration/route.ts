@@ -14,16 +14,9 @@ export async function GET() {
         knownSpeedKmh: { gt: 0 },
         measuredSpeedKmh: { gt: 0 },
       },
-      select: {
-        id: true,
-        label: true,
-        knownSpeedKmh: true,
-        measuredSpeedKmh: true,
-        calibrationFactor: true,
-        knownDistanceMeters: true,
-        ballDisplacementPx: true,
-        metersPerPixel: true,
-      },
+      // No explicit `select`: the calibration summary reads measurement-quality
+      // columns, and listing them here would break the build whenever the
+      // Prisma client has not been regenerated after a schema change.
       orderBy: { createdAt: "desc" },
     });
 
