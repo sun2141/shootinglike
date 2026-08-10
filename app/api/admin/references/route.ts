@@ -74,6 +74,16 @@ function validateReferencePayload(body: Record<string, unknown>) {
   const measurementGrade =
     rawGrade === "high" || rawGrade === "medium" || rawGrade === "low" ? rawGrade : null;
 
+  const rawScaleSource =
+    typeof body.scaleSource === "string" ? body.scaleSource.toLowerCase().trim() : null;
+  const scaleSource =
+    rawScaleSource === "body" || rawScaleSource === "ball" || rawScaleSource === "body+ball"
+      ? rawScaleSource
+      : null;
+  const scaleUncertainty = parseOptionalNumber(body.scaleUncertainty);
+  const ballDiameterPx = parseOptionalNumber(body.ballDiameterPx);
+  const ballDiameterCm = parseOptionalNumber(body.ballDiameterCm);
+
   if (knownSpeedKmh === null || measuredSpeedKmh === null) {
     return { error: "Known speed and measured speed are required." };
   }
@@ -139,6 +149,18 @@ function validateReferencePayload(body: Record<string, unknown>) {
     return { error: "Measurement uncertainty must be a positive relative value." };
   }
 
+  if (scaleUncertainty !== null && (scaleUncertainty <= 0 || scaleUncertainty > 5)) {
+    return { error: "Scale uncertainty must be a positive relative value." };
+  }
+
+  if (ballDiameterPx !== null && (ballDiameterPx < 1 || ballDiameterPx > 2000)) {
+    return { error: "Ball diameter must be between 1 and 2000 pixels." };
+  }
+
+  if (ballDiameterCm !== null && (ballDiameterCm < 10 || ballDiameterCm > 40)) {
+    return { error: "Ball diameter must be between 10 and 40 cm." };
+  }
+
   const sample: ReferenceCalibrationSample = {
     knownSpeedKmh,
     measuredSpeedKmh,
@@ -186,6 +208,10 @@ function validateReferencePayload(body: Record<string, unknown>) {
       measurementUncertainty,
       measurementGrade,
       trajectoryPoints,
+      scaleSource,
+      scaleUncertainty,
+      ballDiameterPx,
+      ballDiameterCm,
       isActive: body.isActive !== false,
     },
   };

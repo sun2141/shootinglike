@@ -14,6 +14,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { BrowserVideoAnalyzer } from "@/lib/analysis/client-video-analyzer";
+import { DEFAULT_PLAYER_HEIGHT_CM } from "@/lib/analysis/pipeline/run-analysis";
 import type { PipelineResult } from "@/lib/analysis/pipeline/types";
 import {
   findAnswer,
@@ -25,6 +26,12 @@ import {
   MAX_SAMPLE_UNCERTAINTY,
   type ReferenceCalibrationSummary,
 } from "@/lib/analysis/reference-calibration";
+import {
+  BALL_SPECS,
+  DEFAULT_BALL_SIZE_ID,
+  getBallSpec,
+  type BallSizeId,
+} from "@/lib/analysis/scale-reference";
 
 const ADMIN_TOKEN_STORAGE_KEY = "freekickAdminReferenceToken";
 const CAMERA_ANGLES = ["side", "diagonal", "front", "behind"] as const;
@@ -37,6 +44,13 @@ interface ClipRow {
   file: File;
   objectUrl: string;
   knownSpeedKmh: number | null;
+  /**
+   * Raw height input for this clip's kicker. Empty means "follow the batch
+   * default", which itself may be unknown — an unknown height is a first-class
+   * state here because most reference clips are other people's footage. Kept as
+   * a string so half-typed values are not wiped while editing.
+   */
+  playerHeightInput: string;
   status: ClipStatus;
   progress: number;
   result: PipelineResult | null;
@@ -51,6 +65,10 @@ interface ReferenceRecord {
   measuredSpeedKmh: number;
   calibrationFactor: number;
   cameraAngle: string | null;
+  playerHeightCm: number | null;
+  scaleSource: string | null;
+  scaleUncertainty: number | null;
+  ballDiameterPx: number | null;
   measurementUncertainty: number | null;
   measurementGrade: string | null;
   isActive: boolean;
@@ -66,8 +84,30 @@ interface ReferencesResponse {
 
 const VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
 
+const MIN_PLAYER_HEIGHT_CM = 120;
+const MAX_PLAYER_HEIGHT_CM = 220;
+
+const SCALE_SOURCE_LABEL: Record<string, string> = {
+  body: "신체",
+  ball: "공",
+  "body+ball": "신체+공",
+};
+
 function isVideoFile(file: File) {
   return file.type.startsWith("video/") || VIDEO_EXTENSION_PATTERN.test(file.name);
+}
+
+/**
+ * Returns the height only when it is a usable measurement. Anything blank or
+ * out of range collapses to `null` — "we do not know" — instead of silently
+ * becoming a number the pipeline would treat as user-supplied truth.
+ */
+function parseHeightCm(value: string | number | null | undefined) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < MIN_PLAYER_HEIGHT_CM || parsed > MAX_PLAYER_HEIGHT_CM) return null;
+  return parsed;
 }
 
 function formatSigned(value: number | null, unit: string) {
@@ -95,7 +135,11 @@ export default function ReferenceBatchPage() {
   const [rows, setRows] = useState<ClipRow[]>([]);
   const [answerSheetText, setAnswerSheetText] = useState("");
   const [cameraAngle, setCameraAngle] = useState<CameraAngle>("side");
-  const [playerHeightCm, setPlayerHeightCm] = useState("175");
+  // Blank on purpose: the kicker's height is usually unknown for reference
+  // footage, and pre-filling 175 made every saved row claim a height we never
+  // actually had.
+  const [defaultHeightCm, setDefaultHeightCm] = useState("");
+  const [ballSizeId, setBallSizeId] = useState<BallSizeId>(DEFAULT_BALL_SIZE_ID);
   const [distanceMeters, setDistanceMeters] = useState("");
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -159,13 +203,25 @@ export default function ReferenceBatchPage() {
   }, [loadReferences]);
 
   const answerEntries = useMemo(() => parseAnswerSheet(answerSheetText), [answerSheetText]);
+  const fallbackHeightCm = useMemo(() => parseHeightCm(defaultHeightCm), [defaultHeightCm]);
+
+  /** Row value wins, batch default fills in, `null` means genuinely unknown. */
+  const resolveHeightCm = useCallback(
+    (row: ClipRow) => parseHeightCm(row.playerHeightInput) ?? fallbackHeightCm,
+    [fallbackHeightCm]
+  );
 
   const applyAnswerSheet = useCallback(() => {
     setRows((previous) =>
       previous.map((row) => {
         const answer = findAnswer(row.file.name, answerEntries);
         if (!answer) return row;
-        return { ...row, knownSpeedKmh: answer.knownSpeedKmh };
+        return {
+          ...row,
+          knownSpeedKmh: answer.knownSpeedKmh,
+          playerHeightInput:
+            answer.playerHeightCm === null ? row.playerHeightInput : String(answer.playerHeightCm),
+        };
       })
     );
     setMessage(`정답표 ${answerEntries.length}건을 적용했습니다.`);
@@ -188,6 +244,8 @@ export default function ReferenceBatchPage() {
           file,
           objectUrl: URL.createObjectURL(file),
           knownSpeedKmh: answer?.knownSpeedKmh ?? parseKnownSpeedKmh(file.name),
+          playerHeightInput:
+            answer?.playerHeightCm != null ? String(answer.playerHeightCm) : "",
           status: "pending",
           progress: 0,
           result: null,
@@ -233,7 +291,6 @@ export default function ReferenceBatchPage() {
     const analyzer = analyzerRef.current ?? new BrowserVideoAnalyzer();
     analyzerRef.current = analyzer;
 
-    const heightValue = Number.parseFloat(playerHeightCm);
     const targets = rowsRef.current.filter((row) => row.status !== "saved");
 
     try {
@@ -249,13 +306,19 @@ export default function ReferenceBatchPage() {
 
       updateRow(target.id, { status: "analyzing", progress: 0, error: null, result: null });
 
+      // An unknown height still analyses fine — the pipeline falls back to its
+      // default figure — but it must be flagged as a guess so the reported
+      // uncertainty widens instead of pretending to a precision we lack.
+      const resolvedHeightCm = resolveHeightCm(target);
+
       try {
         // Calibration is intentionally not applied here: reference clips must
         // record the *raw* measurement, otherwise the calibration factor would
         // be derived from already-calibrated numbers.
         const result = await analyzer.analyze(target.objectUrl, {
-          playerHeightCm: Number.isFinite(heightValue) ? heightValue : null,
-          playerHeightProvided: Number.isFinite(heightValue),
+          playerHeightCm: resolvedHeightCm,
+          playerHeightProvided: resolvedHeightCm !== null,
+          ballSizeId,
           calibration: null,
           label: target.file.name,
           isCancelled: () => cancelRef.current,
@@ -280,7 +343,7 @@ export default function ReferenceBatchPage() {
 
     setIsAnalyzing(false);
     setMessage(cancelRef.current ? "분석을 중단했습니다." : "일괄 분석을 완료했습니다.");
-  }, [isAnalyzing, playerHeightCm, rows.length, updateRow]);
+  }, [ballSizeId, isAnalyzing, resolveHeightCm, rows.length, updateRow]);
 
   const stopAnalysis = useCallback(() => {
     cancelRef.current = true;
@@ -307,10 +370,10 @@ export default function ReferenceBatchPage() {
     let failed = 0;
 
     const parsedDistance = Number.parseFloat(distanceMeters);
-    const parsedHeight = Number.parseFloat(playerHeightCm);
 
     for (const row of savable) {
       const result = row.result as PipelineResult;
+      const resolvedHeightCm = resolveHeightCm(row);
 
       try {
         const response = await fetch("/api/admin/references", {
@@ -326,18 +389,28 @@ export default function ReferenceBatchPage() {
             knownDistanceMeters: Number.isFinite(parsedDistance) && parsedDistance > 0 ? parsedDistance : null,
             ballDisplacementPx: result.ballDisplacementPx ?? null,
             bodyHeightPx: result.kickerHeightPx ?? null,
-            playerHeightCm: Number.isFinite(parsedHeight) ? parsedHeight : null,
+            // Null is a meaningful value: the row is saved as "height unknown"
+            // rather than inheriting a made-up figure.
+            playerHeightCm: resolvedHeightCm,
             cameraAngle,
             // Quality of this measurement decides whether it may influence the
             // calibration factor at all.
             measurementUncertainty: result.speedUncertainty?.relative ?? null,
             measurementGrade: result.speedUncertainty?.grade ?? null,
             trajectoryPoints: result.trajectoryPoints,
+            // Which ruler produced this number, so a later audit can tell a
+            // ball-scaled row from a body-scaled one.
+            scaleSource: result.scale?.source ?? null,
+            scaleUncertainty: result.scale?.relativeUncertainty ?? null,
+            ballDiameterPx: result.ballDiameterPx ?? null,
+            ballDiameterCm: result.scale?.ballDiameterCm ?? null,
             notes: [
               `trajectory ${result.trajectoryPoints}pt`,
               result.trajectoryFitR2 !== undefined ? `r2 ${result.trajectoryFitR2}` : null,
               result.speedUncertainty ? `grade ${result.speedUncertainty.grade}` : null,
               result.sceneCuts > 0 ? `cuts ${result.sceneCuts}` : null,
+              resolvedHeightCm === null ? "height unknown" : `height ${resolvedHeightCm}cm`,
+              result.scale ? `scale ${result.scale.source}` : null,
             ]
               .filter(Boolean)
               .join(" · "),
@@ -364,7 +437,7 @@ export default function ReferenceBatchPage() {
     setIsSaving(false);
     setMessage(`${saved}건 저장${failed > 0 ? `, ${failed}건 실패` : ""}.`);
     await loadReferences();
-  }, [authHeaders, cameraAngle, distanceMeters, loadReferences, playerHeightCm, updateRow]);
+  }, [authHeaders, cameraAngle, distanceMeters, loadReferences, resolveHeightCm, updateRow]);
 
   const deleteReference = useCallback(
     async (id: string) => {
@@ -491,7 +564,22 @@ export default function ReferenceBatchPage() {
             </div>
           </div>
 
-          <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-mono uppercase tracking-widest text-gray-500">공 규격</span>
+              <select
+                value={ballSizeId}
+                onChange={(event) => setBallSizeId(event.target.value as BallSizeId)}
+                className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-green)]"
+              >
+                {BALL_SPECS.map((spec) => (
+                  <option key={spec.id} value={spec.id} className="bg-black">
+                    {spec.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             <label className="flex flex-col gap-1">
               <span className="text-xs font-mono uppercase tracking-widest text-gray-500">촬영 각도</span>
               <select
@@ -508,13 +596,16 @@ export default function ReferenceBatchPage() {
             </label>
 
             <label className="flex flex-col gap-1">
-              <span className="text-xs font-mono uppercase tracking-widest text-gray-500">선수 키 (cm)</span>
+              <span className="text-xs font-mono uppercase tracking-widest text-gray-500">
+                기본 키 (cm, 모르면 비움)
+              </span>
               <input
                 type="number"
-                min="120"
-                max="220"
-                value={playerHeightCm}
-                onChange={(event) => setPlayerHeightCm(event.target.value)}
+                min={MIN_PLAYER_HEIGHT_CM}
+                max={MAX_PLAYER_HEIGHT_CM}
+                value={defaultHeightCm}
+                onChange={(event) => setDefaultHeightCm(event.target.value)}
+                placeholder="미상"
                 className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--color-neon-green)]"
               />
             </label>
@@ -532,6 +623,14 @@ export default function ReferenceBatchPage() {
               />
             </label>
           </div>
+
+          <p className="mt-3 text-xs text-gray-500">
+            키를 몰라도 분석·저장 모두 가능합니다. 공은 크기가 규격으로 고정돼 있어
+            <strong className="text-gray-300"> 지름({getBallSpec(ballSizeId).diameterCm}cm)만으로 거리 환산</strong>이
+            되기 때문입니다. 키를 함께 입력하면 두 기준을 가중 평균해 더 좁은 오차 범위가 나오고, 비워두면 공 쪽
+            비중이 자동으로 커집니다. 기본 키를 비우면 파이프라인 기본값({DEFAULT_PLAYER_HEIGHT_CM}cm)이 쓰이되
+            추정치로 기록됩니다.
+          </p>
         </section>
 
         {/* Step 2 — run */}
@@ -581,14 +680,16 @@ export default function ReferenceBatchPage() {
             <p className="py-8 text-center text-sm text-gray-500">아직 추가된 클립이 없습니다.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[880px] text-left text-sm">
+              <table className="w-full min-w-[1060px] text-left text-sm">
                 <thead className="text-xs font-mono uppercase tracking-widest text-gray-500">
                   <tr className="border-b border-white/10">
                     <th className="py-2 pr-3">파일</th>
                     <th className="py-2 pr-3">실제 km/h</th>
+                    <th className="py-2 pr-3">키 cm</th>
                     <th className="py-2 pr-3">측정 km/h</th>
                     <th className="py-2 pr-3">오차</th>
                     <th className="py-2 pr-3">신뢰도</th>
+                    <th className="py-2 pr-3">스케일</th>
                     <th className="py-2 pr-3">궤적</th>
                     <th className="py-2 pr-3">상태</th>
                     <th className="py-2" />
@@ -599,6 +700,8 @@ export default function ReferenceBatchPage() {
                     const measured = row.result?.estimatedSpeedKmh ?? 0;
                     const percent = errorPercent(row);
                     const grade = row.result?.speedUncertainty?.grade ?? null;
+                    const rowHeight = resolveHeightCm(row);
+                    const scale = row.result?.scale ?? null;
 
                     return (
                       <tr key={row.id} className="border-b border-white/5 align-top">
@@ -615,6 +718,26 @@ export default function ReferenceBatchPage() {
                               })
                             }
                             className="w-20 rounded border border-white/20 bg-white/10 px-2 py-1 text-right text-sm outline-none focus:border-[var(--color-neon-green)]"
+                          />
+                        </td>
+                        <td className="py-3 pr-3">
+                          <input
+                            type="number"
+                            min={MIN_PLAYER_HEIGHT_CM}
+                            max={MAX_PLAYER_HEIGHT_CM}
+                            value={row.playerHeightInput}
+                            placeholder={fallbackHeightCm === null ? "미상" : String(fallbackHeightCm)}
+                            onChange={(event) =>
+                              updateRow(row.id, { playerHeightInput: event.target.value })
+                            }
+                            title={
+                              rowHeight === null
+                                ? `키 미상 — 기본값 ${DEFAULT_PLAYER_HEIGHT_CM}cm로 추정 계산합니다`
+                                : undefined
+                            }
+                            className={`w-20 rounded border bg-white/10 px-2 py-1 text-right text-sm outline-none focus:border-[var(--color-neon-green)] ${
+                              rowHeight === null ? "border-white/10 text-gray-400" : "border-white/20"
+                            }`}
                           />
                         </td>
                         <td className="py-3 pr-3 font-mono">{measured > 0 ? measured : "—"}</td>
@@ -637,6 +760,24 @@ export default function ReferenceBatchPage() {
                               }
                             >
                               {grade}
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="py-3 pr-3 text-xs">
+                          {scale ? (
+                            <span
+                              className={
+                                scale.source === "body" ? "text-gray-400" : "text-[var(--color-neon-blue)]"
+                              }
+                              title={
+                                scale.disagreement === null
+                                  ? `±${(scale.relativeUncertainty * 100).toFixed(0)}% · 공 표본 ${scale.ballSampleCount}프레임`
+                                  : `±${(scale.relativeUncertainty * 100).toFixed(0)}% · 두 기준 차이 ${(scale.disagreement * 100).toFixed(0)}% · 공 표본 ${scale.ballSampleCount}프레임`
+                              }
+                            >
+                              {SCALE_SOURCE_LABEL[scale.source]}
                             </span>
                           ) : (
                             "—"
@@ -789,7 +930,7 @@ export default function ReferenceBatchPage() {
             <p className="py-6 text-center text-sm text-gray-500">저장된 레퍼런스가 없습니다.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] text-left text-sm">
+              <table className="w-full min-w-[820px] text-left text-sm">
                 <thead className="text-xs font-mono uppercase tracking-widest text-gray-500">
                   <tr className="border-b border-white/10">
                     <th className="py-2 pr-3">라벨</th>
@@ -797,6 +938,8 @@ export default function ReferenceBatchPage() {
                     <th className="py-2 pr-3">측정</th>
                     <th className="py-2 pr-3">계수</th>
                     <th className="py-2 pr-3">측정 신뢰도</th>
+                    <th className="py-2 pr-3">키</th>
+                    <th className="py-2 pr-3">스케일</th>
                     <th className="py-2 pr-3">각도</th>
                     <th className="py-2" />
                   </tr>
@@ -822,6 +965,37 @@ export default function ReferenceBatchPage() {
                             ±{(uncertainty * 100).toFixed(0)}%
                             {reference.measurementGrade ? ` (${reference.measurementGrade})` : ""}
                             {qualified ? "" : " · 제외"}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3 font-mono text-xs">
+                        {reference.playerHeightCm == null ? (
+                          <span className="text-gray-500" title="키 미상 — 기본값으로 추정해 계산한 행입니다">
+                            미상
+                          </span>
+                        ) : (
+                          `${reference.playerHeightCm}cm`
+                        )}
+                      </td>
+                      <td className="py-2 pr-3 text-xs">
+                        {reference.scaleSource == null ? (
+                          <span className="text-gray-500" title="스케일 기록 이전에 저장된 행 — 신체 기준으로 측정됐습니다">
+                            미기록
+                          </span>
+                        ) : (
+                          <span
+                            className={
+                              reference.scaleSource === "body"
+                                ? "text-gray-400"
+                                : "text-[var(--color-neon-blue)]"
+                            }
+                            title={
+                              reference.ballDiameterPx == null
+                                ? undefined
+                                : `공 지름 ${reference.ballDiameterPx}px`
+                            }
+                          >
+                            {SCALE_SOURCE_LABEL[reference.scaleSource] ?? reference.scaleSource}
                           </span>
                         )}
                       </td>

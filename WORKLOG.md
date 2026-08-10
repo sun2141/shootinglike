@@ -5,6 +5,110 @@
 
 ---
 
+## 2026-08-11 · Claude — 공 지름을 고정 크기 스케일 기준으로 추가 (키 없이 구속 산출)
+
+### 배경
+전날 작업으로 '키 미상'을 정직하게 기록하게 됐지만, 여전히 **유일한 자(ruler)는 키커의
+nose-to-ankle 픽셀 span**이었다. 즉 키를 모르면 스케일 자체가 추정이었다.
+공은 규격으로 크기가 고정(5호 지름 22cm)돼 있고 **이미 bbox로 검출 중**이므로,
+추가 모델 없이 두 번째 기준으로 쓸 수 있다.
+
+### 신규 `lib/analysis/scale-reference.ts`
+- `BALL_SPECS`: 5호 22 / 4호 20.5 / 3호 18.5 / 풋살4호 20cm. (FIFA는 둘레 규정 → 지름 환산)
+- `estimateBodyScale(spanPx, heightM, provided)` → px/m + 불확실도(0.12, 키 미상이면 +0.06)
+- `estimateBallScale({diameterPx, diameterCm, sampleCount, relativeSpread})` → px/m + 불확실도
+  = √(박스 여유 0.08² + 양자화 (2/D)² + 산포/√n)
+- `fuseScales(body, ball)` → **역분산 가중평균**. 키를 모르면 몸 쪽 가중치가 자동으로 떨어지고
+  공이 추정을 이끈다. 두 기준이 25% 넘게 어긋나면 밴드를 gap/2 이상으로 넓힌다.
+- `isBallSizePlausible(diameterPx, spanPx)`: **비율 게이트 0.09~0.27.**
+  사람 키 120~200cm 어디든 공/span 비는 0.125~0.21이므로, 이 범위를 벗어난 공은
+  오검출이거나 전혀 다른 거리에 있는 것 → 기준에서 제외.
+  **가정한 키가 아니라 화면상 span으로 검증**하는 게 핵심 — 틀린 키 가정이야말로 이 게이트가
+  견뎌야 할 실패 모드이기 때문.
+
+### 트래커 (`kick-tracker.ts`)
+- **임팩트 이전, 정지 상태**의 공 bbox에서만 지름 표본 수집(최대 60개).
+  비행 중에는 모션블러로 박스가 늘어나고 카메라에서 멀어져 크기가 변하므로 무의미.
+- 필터: 종횡비 1.35 초과 제외, 직전 프레임 대비 지름의 0.6배 넘게 움직였으면 제외,
+  motion 기반 박스 제외. 컷 발생 시(임팩트 전) 표본 초기화.
+- `TrackingOutcome.ballScale = {diameterPx(중앙값), sampleCount, relativeSpread(IQR/중앙값)}`
+
+### 파이프라인 (`run-analysis.ts`, `confidence.ts`, `types.ts`)
+- 속도 = `pxPerSecond / 융합 px/m`. `pixelSpeedToKmh`(몸 전용)는 더 이상 이 경로에서 안 씀.
+- `confidence.ts`가 하드코딩된 scale 항 대신 **실제 `scaleUncertainty`**를 받는다.
+  공 기준이 튼튼하면 "키를 입력하세요" 안내도 뜨지 않는다.
+- **포즈 검출 실패해도 구속 산출 가능해짐.** 기존 `kickerHeightPx <= 0` 즉시 실패 조건 제거,
+  궤적 outlier tolerance도 포즈 없으면 공 지름×8로 환산.
+- `PipelineResult.scale: ScaleReport{pixelsPerMeter, relativeUncertainty, source, ballDiameterCm,
+  ballSampleCount, disagreement}`, `ballDiameterPx` 추가.
+- 옵션: `ballSizeId`, `useBallScale`(A/B용 킬스위치).
+
+### 검산 (1080p, span 600px, 실제 100km/h 기준)
+| 시나리오 | 몸만 | 최종 | 밴드 |
+|---|---|---|---|
+| 키 정확 + 공 정상 | 100.0 | 100.0 | ±7% (기존 ±12%) |
+| 키 미상, 실제 190cm | 92.1 | **98.4** | ±8% |
+| 키 미상, 실제 160cm | 109.4 | **101.6** | ±8% |
+| 키 미상, 실제 120cm 아동 | 145.8 | **105.9** | ±23% |
+| 키 정확 + 공 2배 오검출 | 100.0 | 100.0 (공 제외) | ±12% |
+| 키 미상 + 공이 먼 거리(30px) | 100.0 | 100.0 (공 제외) | ±18% |
+
+키 미상 샘플의 측정 불확실도 하한이 **±23% → ±17%**로 내려가, 어제 언급한
+`MAX_SAMPLE_UNCERTAINTY=0.3` 게이트에 여유가 크게 생겼다.
+
+### 스키마 (마이그레이션 필요)
+`prisma/migrations/20260811090000_add_reference_scale_source/migration.sql`
+- `ReferenceVideo`에 `scaleSource`, `scaleUncertainty`, `ballDiameterPx`, `ballDiameterCm` 추가.
+- 전부 nullable. 기존 행 NULL = "스케일 미기록(신체 기준)".
+
+### UI
+- 레퍼런스 배치 페이지 / `/analyze` 양쪽에 **공 규격 선택** 추가(기본 5호).
+- 배치 표와 저장된 레퍼런스 표에 `스케일` 컬럼(신체 / 공 / 신체+공, 툴팁에 밴드·표본수).
+
+### 후속 필요사항
+- **로컬에서 `npx prisma migrate deploy` + `npx prisma generate` 실행 필요.**
+  샌드박스는 Prisma 엔진/SWC 바이너리를 받을 수 없어 `tsc`·`eslint`까지만 검증했다.
+  `create()`에 넘기는 객체는 변수라 초과 프로퍼티 검사가 안 걸리므로, generate 전에는
+  타입체크가 통과해도 런타임에 `Unknown arg` 로 실패한다.
+- 유스/풋살 클립을 섞어 저장할 거면 배치 단위로 공 규격을 나눠 돌려야 한다(현재 전체 공통 1개 값).
+- 골대·페널티 마크 자동 검출은 이번에도 제외. 필요하면 선 검출(Hough) 도입 검토.
+
+---
+
+## 2026-08-10 · Claude — 레퍼런스 DB: 키커 키를 몰라도 작업 가능하도록 변경
+
+### 배경
+레퍼런스 클립은 대부분 타인의 영상이라 **키커의 키를 알 수 없다.** 그런데 기존 페이지는
+전체 공통 키 입력이 `"175"`로 하드코딩 프리필되어 있어, `playerHeightProvided: true`가
+**항상** 전달됐다. 즉 모르는 키를 아는 것처럼 저장했고, 그 결과 측정 불확실도가 실제보다
+6%p 낮게 기록되어 보정 게이트를 부당하게 통과할 수 있었다.
+
+### 변경 (`app/admin/references/page.tsx` 단독 · 스키마/API 변경 없음)
+1. **‘미상’이 1급 상태**가 됨. 상단 입력은 `기본 키 (cm, 모르면 비움)`으로 바뀌고 기본값은 **빈 문자열**.
+2. **행별 키 입력 추가.** 배치 표에 `키 cm` 컬럼 신설. 비우면 상단 기본값을 따르고, 둘 다 비면 미상.
+   - `ClipRow.playerHeightInput: string` (raw 문자열로 보관 — 입력 중 값이 지워지지 않게)
+   - `resolveHeightCm(row) = parseHeightCm(row.playerHeightInput) ?? fallbackHeightCm`
+   - `parseHeightCm`는 120~220cm 범위 밖/공백을 전부 `null`로 접는다.
+3. **정답표의 `키cm` 컬럼이 실제로 적용된다.** 기존엔 `parseAnswerSheet`가 파싱만 하고 버렸음.
+4. **분석**: `playerHeightProvided`가 이제 진짜 입력 여부를 반영. 미상이면 파이프라인 기본값
+   175cm로 계산하되 `confidence.ts`의 `SCALE_HEIGHT_GUESS_UNCERTAINTY(+0.06)`가 적용된다.
+5. **저장**: `playerHeightCm: null` 그대로 POST(스키마가 이미 nullable). notes에 `height unknown` 기록.
+6. **표시**: 저장된 레퍼런스 표에 `키` 컬럼 추가 — null이면 `미상` 배지.
+
+### 보정 계수에 미치는 영향
+키 미상 샘플은 **제외되지 않고 불확실도만 넓어진 채 포함**된다(사용자 선택).
+불확실도 하한이 ±19% → ±23%로 오르지만 `MAX_SAMPLE_UNCERTAINTY = 0.3` 게이트는 통과하므로,
+키를 몰라도 레퍼런스 축적은 계속 가능하다. 다만 `REQUIRED_FACTOR_UNCERTAINTY = 0.08`에
+도달하려면 키 미상 클립은 더 많이 필요하다.
+
+### 후속 필요사항
+- **기존 DB 행은 신뢰도가 과대평가되어 있다.** 8/10 이전에 저장된 행은 키를 모르면서도
+  `playerHeightProvided: true`로 계산됐으므로, 정밀하게 하려면 재분석 후 덮어쓰기 권장.
+- 근본 해결책은 키 대신 **공 지름(≈22cm)이나 골대/페널티 마크 같은 고정 크기 기준**으로
+  스케일을 잡는 것. 파이프라인 변경이라 이번 범위에서는 제외했다.
+
+---
+
 ## 2026-08-05 (3) · Claude — 레퍼런스 보정 신뢰도 게이트 + 배포 준비
 
 ### 배경

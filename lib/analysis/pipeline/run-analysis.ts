@@ -7,7 +7,17 @@ import {
   estimateReferenceDistanceMeters,
   type ReferenceCalibrationSummary,
 } from "../reference-calibration";
-import { pixelSpeedToKmh } from "../speed";
+import { MAX_REPORTABLE_SPEED_KMH } from "../speed";
+import {
+  DEFAULT_BALL_SIZE_ID,
+  estimateBallScale,
+  estimateBodyScale,
+  fuseScales,
+  getBallSpec,
+  isBallSizePlausible,
+  type BallSizeId,
+  type FusedScale,
+} from "../scale-reference";
 import { generateFeedback } from "../feedback";
 import { estimateSpeedUncertainty } from "./confidence";
 import { seekToTime, waitForVideoData } from "./frame-source";
@@ -23,6 +33,8 @@ export const DEFAULT_PLAYER_HEIGHT_CM = 175;
 
 /** Trajectory outlier tolerance, as a fraction of the kicker's on-screen height. */
 const TRAJECTORY_TOLERANCE_HEIGHTS = 0.05;
+/** ~175cm / 22cm. Used to express a body height in ball diameters when no pose is found. */
+const BALL_DIAMETERS_PER_BODY_HEIGHT = 8;
 
 export interface RunAnalysisOptions {
   video: HTMLVideoElement;
@@ -30,6 +42,14 @@ export interface RunAnalysisOptions {
   playerHeightCm?: number | null;
   /** True when the height came from the user rather than the default. */
   playerHeightProvided?: boolean;
+  /**
+   * Regulation size of the ball in play. Its diameter is a fixed-size metric
+   * reference that needs no user input, so it carries the scale when the
+   * kicker's height is unknown.
+   */
+  ballSizeId?: BallSizeId | null;
+  /** Set false to fall back to the body-only scale (diagnostics, A/B runs). */
+  useBallScale?: boolean;
   calibration?: ReferenceCalibrationSummary | null;
   isCancelled?: () => boolean;
   onProgress?: (progress: { current: number; total: number; progress: number }) => void;
@@ -66,6 +86,15 @@ async function createWorkerFrame(
   }
 
   return ctx.getImageData(0, 0, width, height);
+}
+
+/** Same conversion `pixelSpeedToKmh` does, but against a fused scale. */
+function pixelSpeedToKmhWithScale(pxPerSecond: number, scale: FusedScale) {
+  if (!Number.isFinite(pxPerSecond) || pxPerSecond <= 0) return 0;
+  if (scale.pixelsPerMeter <= 0) return 0;
+
+  const speedKmh = (pxPerSecond / scale.pixelsPerMeter) * 3.6;
+  return Math.min(Math.round(speedKmh), MAX_REPORTABLE_SPEED_KMH);
 }
 
 function resolvePlayerHeightM(playerHeightCm?: number | null) {
@@ -194,10 +223,48 @@ export async function runVideoAnalysis(options: RunAnalysisOptions): Promise<Pip
   base.trajectoryPoints = outcome.trajectory.length;
   if (outcome.kickerHeightPx > 0) base.kickerHeightPx = outcome.kickerHeightPx;
 
-  const tolerance = Math.max(2, outcome.kickerHeightPx * TRAJECTORY_TOLERANCE_HEIGHTS);
+  // Two independent rulers, combined by how much each can be trusted. The body
+  // span needs a height we often do not have; the ball's diameter is fixed by
+  // regulation but is only a handful of pixels across.
+  const ballSpec = getBallSpec(options.ballSizeId ?? DEFAULT_BALL_SIZE_ID);
+  const bodyScale = estimateBodyScale(
+    outcome.kickerHeightPx,
+    playerHeightM,
+    options.playerHeightProvided ?? false
+  );
+  // Sanity-check the ball against the kicker's on-screen size before trusting
+  // it. A box that is far too small or too large belongs to something at a
+  // different distance, and blending it in would corrupt the speed outright.
+  const ballSizePlausible =
+    outcome.ballScale.diameterPx > 0 &&
+    isBallSizePlausible(outcome.ballScale.diameterPx, outcome.kickerHeightPx);
+
+  const ballScale =
+    options.useBallScale === false || !ballSizePlausible
+      ? null
+      : estimateBallScale({
+          diameterPx: outcome.ballScale.diameterPx,
+          diameterCm: ballSpec.diameterCm,
+          sampleCount: outcome.ballScale.sampleCount,
+          relativeSpread: outcome.ballScale.relativeSpread,
+        });
+
+  const scale = fuseScales(bodyScale, ballScale);
+
+  /*
+   * Outlier tolerance is a fraction of the subject's on-screen size. The body
+   * span is preferred, but a clip with no usable pose still has the ball: an
+   * adult is roughly eight ball-diameters tall, so that converts cleanly.
+   */
+  const toleranceReferencePx =
+    outcome.kickerHeightPx > 0
+      ? outcome.kickerHeightPx
+      : outcome.ballScale.diameterPx * BALL_DIAMETERS_PER_BODY_HEIGHT;
+  const tolerance = Math.max(2, toleranceReferencePx * TRAJECTORY_TOLERANCE_HEIGHTS);
   const fit = outcome.trajectory.length >= 3 ? fitTrajectorySpeed(outcome.trajectory, tolerance) : null;
 
-  if (!fit || outcome.kickerHeightPx <= 0) {
+  // A missing pose is no longer fatal — the ball alone can carry the scale.
+  if (!fit || !scale || scale.pixelsPerMeter <= 0) {
     const formResult: FormResult | null = outcome.formResult;
     if (formResult) {
       base.confidence = "partial";
@@ -209,14 +276,26 @@ export async function runVideoAnalysis(options: RunAnalysisOptions): Promise<Pip
     } else if (outcome.ballFrames > 0) {
       base.confidence = "partial";
       base.feedbacks = [
-        `공 후보 ${outcome.ballFrames}개 프레임을 추적했지만, 전신 기준점이 부족해 구속은 산출하지 않았습니다.`,
-        "공과 키커 전신이 같은 화면에 더 크게 보이도록 촬영하면 속도 산출이 안정적입니다.",
+        `공 후보 ${outcome.ballFrames}개 프레임을 추적했지만, 크기 기준을 잡지 못해 구속은 산출하지 않았습니다.`,
+        "공이 멈춰 있는 장면이 잠깐이라도 담기도록, 또는 키커 전신이 함께 보이도록 촬영하면 속도 산출이 안정적입니다.",
       ];
     }
     return base;
   }
 
-  const rawSpeed = pixelSpeedToKmh(fit.pxPerSecond, outcome.kickerHeightPx, playerHeightM);
+  if (outcome.ballScale.diameterPx > 0) {
+    base.ballDiameterPx = outcome.ballScale.diameterPx;
+  }
+  base.scale = {
+    pixelsPerMeter: Math.round(scale.pixelsPerMeter * 100) / 100,
+    relativeUncertainty: Math.round(scale.relativeUncertainty * 1000) / 1000,
+    source: scale.source,
+    ballDiameterCm: ballScale ? ballSpec.diameterCm : null,
+    ballSampleCount: outcome.ballScale.sampleCount,
+    disagreement: scale.disagreement === null ? null : Math.round(scale.disagreement * 1000) / 1000,
+  };
+
+  const rawSpeed = pixelSpeedToKmhWithScale(fit.pxPerSecond, scale);
   if (rawSpeed <= 0) return base;
 
   const finalSpeed = applyReferenceCalibration(rawSpeed, calibration ?? null);
@@ -228,6 +307,7 @@ export async function runVideoAnalysis(options: RunAnalysisOptions): Promise<Pip
     displacementPx: fit.displacementPx,
     kickerHeightPx: outcome.kickerHeightPx,
     playerHeightProvided: options.playerHeightProvided ?? false,
+    scaleUncertainty: scale.relativeUncertainty,
     inlierCount: fit.inlierCount,
     cameraMotionRatio: outcome.cameraMotionRatio,
     sceneCuts: outcome.sceneCuts,
@@ -243,6 +323,20 @@ export async function runVideoAnalysis(options: RunAnalysisOptions): Promise<Pip
     estimateReferenceDistanceMeters(fit.displacementPx, calibration ?? null) ?? undefined;
 
   const feedbacks: string[] = [];
+
+  if (scale.source === "ball") {
+    feedbacks.push(
+      `공 지름(${ballSpec.diameterCm}cm)을 기준으로 거리를 환산했습니다. 키 입력 없이도 계산됩니다.`
+    );
+  } else if (scale.source === "body+ball") {
+    feedbacks.push(`신체 비율과 공 지름(${ballSpec.diameterCm}cm)을 함께 사용해 거리를 환산했습니다.`);
+  }
+  if (outcome.ballScale.diameterPx > 0 && !ballSizePlausible && options.useBallScale !== false) {
+    feedbacks.push(
+      "검출된 공 크기가 키커 대비 비정상적이라 크기 기준에서 제외했습니다. 공과 키커가 비슷한 거리에 있도록 촬영하면 정확해집니다."
+    );
+  }
+  feedbacks.push(...scale.reasons);
 
   if (calibration?.enabled && calibration.sampleCount > 0) {
     base.referenceCalibration = { factor: calibration.factor, sampleCount: calibration.sampleCount };

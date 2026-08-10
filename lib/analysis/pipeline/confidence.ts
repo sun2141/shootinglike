@@ -1,3 +1,7 @@
+import {
+  BODY_SCALE_BASE_UNCERTAINTY,
+  BODY_SCALE_HEIGHT_GUESS_UNCERTAINTY,
+} from "../scale-reference";
 import type { SpeedUncertainty } from "./types";
 
 export interface UncertaintyInput {
@@ -14,6 +18,13 @@ export interface UncertaintyInput {
   kickerHeightPx: number;
   /** True when the user supplied their own height instead of the default. */
   playerHeightProvided: boolean;
+  /**
+   * Relative uncertainty of the metric scale actually used, from
+   * `fuseScales`. When present it replaces the body-only assumption below —
+   * a known-size reference such as the ball can beat it, and a disagreement
+   * between references can be worse than it.
+   */
+  scaleUncertainty?: number | null;
   /** Trajectory samples that survived outlier rejection. */
   inlierCount: number;
   /** Mean fraction of pixels changing per frame (camera-motion proxy). */
@@ -22,13 +33,12 @@ export interface UncertaintyInput {
   sceneCuts: number;
 }
 
-/**
- * Baseline scale error from using the nose-to-ankle span as a metric ruler:
- * posture, lean and perspective all distort it.
+/*
+ * Body-scale error terms live with the scale model itself so the two cannot
+ * drift apart; these aliases keep the fallback path below readable.
  */
-const SCALE_BASE_UNCERTAINTY = 0.12;
-/** Extra scale error when the player height is a guess rather than user input. */
-const SCALE_HEIGHT_GUESS_UNCERTAINTY = 0.06;
+const SCALE_BASE_UNCERTAINTY = BODY_SCALE_BASE_UNCERTAINTY;
+const SCALE_HEIGHT_GUESS_UNCERTAINTY = BODY_SCALE_HEIGHT_GUESS_UNCERTAINTY;
 /**
  * The pipeline measures a 2D projection of a 3D flight. Until depth is
  * recovered this is an irreducible floor on accuracy.
@@ -68,9 +78,22 @@ export function estimateSpeedUncertainty(input: UncertaintyInput): SpeedUncertai
     reasons.push("공 궤적이 일정하지 않아 검출이 흔들렸을 수 있습니다.");
   }
 
+  // The measured scale uncertainty wins when we have one; the body-only
+  // formula is the fallback for callers that have not been migrated.
+  const measuredScale =
+    typeof input.scaleUncertainty === "number" &&
+    Number.isFinite(input.scaleUncertainty) &&
+    input.scaleUncertainty > 0
+      ? Math.min(1, input.scaleUncertainty)
+      : null;
+
   const scale =
+    measuredScale ??
     SCALE_BASE_UNCERTAINTY + (input.playerHeightProvided ? 0 : SCALE_HEIGHT_GUESS_UNCERTAINTY);
-  if (!input.playerHeightProvided) {
+
+  // Only nag about the height when it would actually help — with a solid
+  // ball-based scale the height barely moves the result.
+  if (!input.playerHeightProvided && scale > SCALE_BASE_UNCERTAINTY) {
     reasons.push("키를 입력하면 거리 환산 오차가 줄어듭니다.");
   }
 

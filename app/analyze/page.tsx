@@ -18,6 +18,11 @@ import { drawLandmarks, drawConnectors } from "@/lib/canvas-utils";
 import { type ReferenceCalibrationSummary } from "@/lib/analysis/reference-calibration";
 import { getAnalysisFrameSize } from "@/lib/analysis/frame-size";
 import { runVideoAnalysis, DEFAULT_PLAYER_HEIGHT_CM } from "@/lib/analysis/pipeline/run-analysis";
+import {
+  BALL_SPECS,
+  DEFAULT_BALL_SIZE_ID,
+  type BallSizeId,
+} from "@/lib/analysis/scale-reference";
 import { VisionWorkers } from "@/lib/analysis/pipeline/vision-workers";
 import type { PipelineResult } from "@/lib/analysis/pipeline/types";
 import { ShareCard } from "@/components/ShareCard";
@@ -142,6 +147,7 @@ export default function AnalyzePage() {
       return false;
     }
   });
+  const [ballSizeId, setBallSizeId] = useState<BallSizeId>(DEFAULT_BALL_SIZE_ID);
   const [videoFile, setVideoFile] = useState<File | null>(null);
 
   const revokeCurrentVideoUrl = useCallback(() => {
@@ -375,6 +381,7 @@ export default function AnalyzePage() {
         workers,
         playerHeightCm: Number.parseFloat(playerHeightCm),
         playerHeightProvided,
+        ballSizeId,
         calibration: referenceCalibrationRef.current,
         isCancelled: () => analysisRunIdRef.current !== runId,
         onProgress: ({ progress }) => {
@@ -436,7 +443,7 @@ export default function AnalyzePage() {
       setIsAnalyzing(false);
       alert("분석 중 오류가 발생했습니다. 다른 영상으로 다시 시도해 주세요.");
     }
-  }, [isModelLoading, modelError, persistAnalysis, playerHeightCm, playerHeightProvided]);
+  }, [ballSizeId, isModelLoading, modelError, persistAnalysis, playerHeightCm, playerHeightProvided]);
 
   const triggerDownload = (blob: Blob) => {
     const url = URL.createObjectURL(blob);
@@ -519,25 +526,49 @@ export default function AnalyzePage() {
                 촬영하세요. 정면 촬영은 구속 정확도가 크게 떨어집니다.
               </p>
 
-              <label className="w-full max-w-md mb-6 flex items-center justify-between gap-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3">
-                <span className="text-sm font-bold text-white">키 보정</span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="120"
-                    max="220"
-                    inputMode="decimal"
-                    value={playerHeightCm}
-                    onChange={(e) => {
-                      setPlayerHeightCm(e.target.value);
-                      setPlayerHeightProvided(true);
-                    }}
-                    className="w-24 rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-right text-sm font-bold text-white outline-none focus:border-[var(--color-neon-green)]"
-                    aria-label="Player height in centimeters"
-                  />
-                  <span className="text-xs font-mono text-gray-400">cm</span>
-                </div>
-              </label>
+              <div className="w-full max-w-md mb-6 flex flex-col gap-2">
+                <label className="flex items-center justify-between gap-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3">
+                  <span className="text-sm font-bold text-white">키 보정 (선택)</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min="120"
+                      max="220"
+                      inputMode="decimal"
+                      value={playerHeightCm}
+                      onChange={(e) => {
+                        setPlayerHeightCm(e.target.value);
+                        setPlayerHeightProvided(true);
+                      }}
+                      className="w-24 rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-right text-sm font-bold text-white outline-none focus:border-[var(--color-neon-green)]"
+                      aria-label="Player height in centimeters"
+                    />
+                    <span className="text-xs font-mono text-gray-400">cm</span>
+                  </div>
+                </label>
+
+                {/* The ball is a ruler of known size, so the height is optional. */}
+                <label className="flex items-center justify-between gap-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3">
+                  <span className="text-sm font-bold text-white">공 규격</span>
+                  <select
+                    value={ballSizeId}
+                    onChange={(e) => setBallSizeId(e.target.value as BallSizeId)}
+                    className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm font-bold text-white outline-none focus:border-[var(--color-neon-green)]"
+                    aria-label="Ball size"
+                  >
+                    {BALL_SPECS.map((spec) => (
+                      <option key={spec.id} value={spec.id} className="bg-black">
+                        {spec.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <p className="px-1 text-xs text-gray-500">
+                  공 크기가 규격으로 고정돼 있어 키를 몰라도 구속이 계산됩니다. 키까지 입력하면 두 기준을 합쳐
+                  오차 범위가 좁아집니다.
+                </p>
+              </div>
 
               {modelError && (
                 <div className="w-full max-w-md mb-6 flex items-start gap-3 rounded-xl border border-yellow-300/30 bg-yellow-300/10 p-4 text-sm text-yellow-100">

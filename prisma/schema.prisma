@@ -56,6 +56,14 @@ model ReferenceVideo {
   measurementUncertainty Float?
   measurementGrade       String?
   trajectoryPoints       Int?
+  // Which metric ruler produced `measuredSpeedKmh`: "body", "ball" or
+  // "body+ball". The ball's diameter is fixed by regulation, so a ball-scaled
+  // measurement needs no player height at all — NULL means the row predates
+  // scale tracking and was body-only.
+  scaleSource            String?
+  scaleUncertainty       Float?
+  ballDiameterPx         Float?
+  ballDiameterCm         Float?
   isActive            Boolean  @default(true)
   notes               String?
   createdAt           DateTime @default(now())

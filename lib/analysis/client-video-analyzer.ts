@@ -3,6 +3,7 @@
 import type { ReferenceCalibrationSummary } from "./reference-calibration";
 import { runVideoAnalysis } from "./pipeline/run-analysis";
 import type { PipelineResult } from "./pipeline/types";
+import type { BallSizeId } from "./scale-reference";
 import { VisionWorkers } from "./pipeline/vision-workers";
 
 export type ClientVideoAnalysisResult = PipelineResult;
@@ -17,6 +18,8 @@ export interface ClientVideoAnalysisProgress {
 export interface ClientVideoAnalysisOptions {
   playerHeightCm?: number | null;
   playerHeightProvided?: boolean;
+  /** Regulation ball size, used as a fixed-size metric reference. */
+  ballSizeId?: BallSizeId | null;
   calibration?: ReferenceCalibrationSummary | null;
   label?: string;
   isCancelled?: () => boolean;
@@ -101,6 +104,7 @@ export class BrowserVideoAnalyzer {
         workers,
         playerHeightCm: options.playerHeightCm,
         playerHeightProvided: options.playerHeightProvided,
+        ballSizeId: options.ballSizeId,
         calibration: options.calibration,
         isCancelled: options.isCancelled,
         onProgress: (progress) =>

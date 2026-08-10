@@ -44,6 +44,20 @@ const TRACK_ASSOCIATION_RADIUS_HEIGHTS = 0.6;
 
 export const BALL_TRACKING_WINDOW_AFTER_IMPACT_MS = 650;
 const MAX_TRAIL_POINTS = 90;
+
+/*
+ * Ball-diameter sampling for the metric scale reference.
+ *
+ * Only pre-impact frames count. Once the ball is in flight its box is smeared
+ * by motion blur and it is receding from the camera, so its apparent size is no
+ * longer the size of a ball sitting where the kicker is standing — which is the
+ * only depth plane we can compare against the body reference.
+ */
+/** Reject boxes this far from square; a round ball should not be elongated. */
+const BALL_MAX_ASPECT_FOR_SCALE = 1.35;
+/** Movement above this fraction of a diameter means it is no longer at rest. */
+const BALL_REST_MOTION_DIAMETERS = 0.6;
+const MAX_BALL_DIAMETER_SAMPLES = 60;
 /** Fraction of changed pixels above which a frame is treated as an edit cut. */
 export const SCENE_CUT_CHANGED_RATIO = 0.45;
 
@@ -131,11 +145,22 @@ export interface KickTrackerOptions {
   frameHeight: number;
 }
 
+/** Ball-size measurement taken while the ball was still at rest. */
+export interface BallScaleObservation {
+  /** Median diameter across accepted samples, px. 0 when unusable. */
+  diameterPx: number;
+  sampleCount: number;
+  /** Interquartile range over the median — how much the samples disagreed. */
+  relativeSpread: number;
+}
+
 export interface TrackingOutcome {
   impactTimeMs: number | null;
   /** Ball centres sampled from just before impact through the flight window. */
   trajectory: TimedPoint[];
   kickerHeightPx: number;
+  /** Known-size reference recovered from the stationary ball. */
+  ballScale: BallScaleObservation;
   footSide: FootSide | null;
   formResult: FormResult | null;
   poseFrames: number;
@@ -166,6 +191,7 @@ export class KickTracker {
 
   private trajectory: TimedPoint[] = [];
   private trail: Point[] = [];
+  private ballDiameterSamples: number[] = [];
 
   private impactPose: PoseCandidate | null = null;
   private impactPoseTimeMs: number | null = null;
@@ -201,7 +227,62 @@ export class KickTracker {
       this.lockedHeightPx = 0;
       this.activeFoot = null;
       this.trajectory = [];
+      // Samples from before a cut may come from a different shot entirely, at a
+      // different zoom — averaging across the cut would corrupt the scale.
+      this.ballDiameterSamples = [];
     }
+  }
+
+  /**
+   * Records the ball's on-screen diameter while it is still sitting on the
+   * ground. Elongated boxes (motion blur, partial occlusion) and boxes from a
+   * ball that has already started moving are discarded rather than averaged in.
+   */
+  private sampleBallDiameter(ball: BallPrediction, center: Point) {
+    if (this.impactTimeMs !== null) return;
+    if (this.ballDiameterSamples.length >= MAX_BALL_DIAMETER_SAMPLES) return;
+    if (!ball.bbox || ball.bbox.length < 4) return;
+    // Motion-derived boxes trace a blob of changed pixels, not the ball itself.
+    if (ball.source === "motion") return;
+
+    const [, , width, height] = ball.bbox;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+
+    const maxSide = Math.max(width, height);
+    const minSide = Math.min(width, height);
+    if (maxSide / minSide > BALL_MAX_ASPECT_FOR_SCALE) return;
+
+    // The short side survives blur better than the long one.
+    const diameterPx = minSide;
+
+    const previous = this.previousBall;
+    if (previous) {
+      const travelled = calculateDistance(center, previous);
+      if (travelled > diameterPx * BALL_REST_MOTION_DIAMETERS) return;
+    }
+
+    this.ballDiameterSamples.push(diameterPx);
+  }
+
+  private buildBallScale(): BallScaleObservation {
+    const samples = [...this.ballDiameterSamples].sort((a, b) => a - b);
+    if (samples.length === 0) return { diameterPx: 0, sampleCount: 0, relativeSpread: 0 };
+
+    const at = (fraction: number) =>
+      samples[Math.min(samples.length - 1, Math.max(0, Math.round(fraction * (samples.length - 1))))];
+
+    const diameterPx = at(0.5);
+    if (diameterPx <= 0) return { diameterPx: 0, sampleCount: 0, relativeSpread: 0 };
+
+    // IQR rather than standard deviation: a couple of bad boxes should not be
+    // able to inflate the reported spread on an otherwise steady measurement.
+    const relativeSpread = samples.length >= 4 ? (at(0.75) - at(0.25)) / diameterPx : 0.15;
+
+    return {
+      diameterPx: Math.round(diameterPx * 100) / 100,
+      sampleCount: samples.length,
+      relativeSpread: Math.round(Math.max(0, relativeSpread) * 1000) / 1000,
+    };
   }
 
   private selectPose(observation: FrameObservation): PoseCandidate | null {
@@ -399,6 +480,10 @@ export class KickTracker {
       this.trail.push(ballCenter);
       if (this.trail.length > MAX_TRAIL_POINTS) this.trail.shift();
 
+      // Must run before `previousBall` is overwritten below — the rest check
+      // compares this frame against the last one.
+      this.sampleBallDiameter(ball, ballCenter);
+
       const previous = this.previousBall;
       if (previous && this.impactTimeMs === null) {
         const dtSeconds = Math.max((observation.timeMs - previous.timeMs) / 1000, 1 / 240);
@@ -483,6 +568,7 @@ export class KickTracker {
       impactTimeMs: this.impactTimeMs,
       trajectory: [...this.trajectory],
       kickerHeightPx: this.lockedHeightPx > 0 ? this.lockedHeightPx : (pose?.heightPx ?? 0),
+      ballScale: this.buildBallScale(),
       footSide: this.footSide,
       formResult: this.buildFormResult(),
       poseFrames: this.poseFrames,

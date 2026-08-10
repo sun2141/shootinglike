@@ -50,6 +50,24 @@ export interface SpeedUncertainty {
   reasons: string[];
 }
 
+/**
+ * How the pipeline turned pixels into metres for this clip. Recorded because
+ * a speed is only as good as its ruler, and the two rulers available (kicker
+ * body span, regulation ball diameter) fail in different situations.
+ */
+export interface ScaleReport {
+  pixelsPerMeter: number;
+  /** Relative 1-sigma uncertainty of `pixelsPerMeter` (0..1). */
+  relativeUncertainty: number;
+  source: "body" | "ball" | "body+ball";
+  /** Assumed real ball diameter, cm. Null when the ball was not usable. */
+  ballDiameterCm: number | null;
+  /** Stationary frames that contributed to the ball measurement. */
+  ballSampleCount: number;
+  /** Relative gap between the two references, or null when only one existed. */
+  disagreement: number | null;
+}
+
 export interface PipelineResult {
   framesAnalyzed: number;
   poseFrames: number;
@@ -66,6 +84,10 @@ export interface PipelineResult {
 
   ballDisplacementPx?: number;
   kickerHeightPx?: number;
+  /** Median on-screen ball diameter while stationary, px. */
+  ballDiameterPx?: number;
+  /** Which metric reference(s) produced the pixels-per-metre used for speed. */
+  scale?: ScaleReport;
   trajectoryPoints: number;
   trajectoryFitR2?: number;
 
