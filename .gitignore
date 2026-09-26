@@ -43,3 +43,6 @@ next-env.d.ts
 
 /app/generated/prisma
 .env*.local
+
+# jev-filter 출력
+/jev-filter-out*/

@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   Camera,
-  Database,
   ImageIcon,
   Loader2,
   Play,
@@ -25,7 +24,11 @@ import {
 } from "@/lib/analysis/scale-reference";
 import { VisionWorkers } from "@/lib/analysis/pipeline/vision-workers";
 import type { PipelineResult } from "@/lib/analysis/pipeline/types";
+import { analyzeVideo } from "@/lib/ballspeed";
+import type { Measurement } from "@/lib/ballspeed/types";
+import { mergeMeasurement, measurementNotes, speedOnlyResult } from "@/lib/analysis/merge-measurement";
 import { ShareCard } from "@/components/ShareCard";
+import { KickRecorder } from "@/components/KickRecorder";
 import html2canvas from "html2canvas";
 
 const MAX_CLIENT_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
@@ -110,6 +113,9 @@ export default function AnalyzePage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisResult, setAnalysisResult] = useState<PipelineResult | null>(null);
+  // 속도 측정은 ballspeed(중력 검산) 모듈이 맡는다. 포즈 파이프라인은 자세 피드백·오버레이용.
+  const [measurement, setMeasurement] = useState<Measurement | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
   const [impactDetected, setImpactDetected] = useState(false);
   const [isPersistingAnalysis, setIsPersistingAnalysis] = useState(false);
   const [referenceCalibration, setReferenceCalibration] = useState<ReferenceCalibrationSummary | null>(null);
@@ -185,7 +191,7 @@ export default function AnalyzePage() {
       console.error("Worker creation failed", error);
       queueMicrotask(() => {
         if (disposed) return;
-        setModelError("브라우저에서 분석 워커를 시작하지 못했습니다.");
+        setModelError("자세 분석 모델을 시작하지 못했습니다. 구속 측정은 그대로 됩니다.");
         setIsModelLoading(false);
       });
       return () => {
@@ -200,7 +206,7 @@ export default function AnalyzePage() {
       .catch((error: Error) => {
         if (disposed) return;
         console.error("Model init failed", error);
-        setModelError("분석 모델을 불러오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
+        setModelError("자세 분석 모델을 불러오지 못했습니다(네트워크 확인). 구속 측정은 그대로 됩니다.");
         setIsModelLoading(false);
       });
 
@@ -296,12 +302,8 @@ export default function AnalyzePage() {
     [optIn, videoFile]
   );
 
-  const handleFileUpload = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      e.target.value = "";
-      if (!file) return;
-
+  const acceptVideoFile = useCallback(
+    (file: File) => {
       const isVideoFile =
         file.type.startsWith("video/") ||
         (!file.type && MOBILE_VIDEO_EXTENSION_PATTERN.test(file.name));
@@ -324,6 +326,7 @@ export default function AnalyzePage() {
       setVideoFile(file);
       setVideoUrl(nextUrl);
       setAnalysisResult(null);
+      setMeasurement(null);
       setImpactDetected(false);
       setAnalysisProgress(0);
       setVideoPreviewAspectRatio(DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO);
@@ -335,6 +338,15 @@ export default function AnalyzePage() {
     [revokeCurrentVideoUrl]
   );
 
+  const handleFileUpload = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (file) acceptVideoFile(file);
+    },
+    [acceptVideoFile]
+  );
+
   const resetVideo = useCallback(() => {
     analysisRunIdRef.current += 1;
     videoRef.current?.pause();
@@ -344,6 +356,7 @@ export default function AnalyzePage() {
     setVideoPreviewAspectRatio(DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO);
     setVideoPreviewError(null);
     setAnalysisResult(null);
+    setMeasurement(null);
     setImpactDetected(false);
     setAnalysisProgress(0);
     setIsAnalyzing(false);
@@ -365,27 +378,31 @@ export default function AnalyzePage() {
     const canvas = canvasRef.current;
     const workers = workersRef.current;
 
-    if (!video || !canvas || !workers || isModelLoading || modelError) return;
+    // 자세 모델이 없어도 구속은 잴 수 있다. 모델 로딩 중일 때만 막는다.
+    if (!video || !canvas || isModelLoading) return;
+    const poseAvailable = Boolean(workers) && !modelError;
 
     const runId = analysisRunIdRef.current + 1;
     analysisRunIdRef.current = runId;
 
     setAnalysisResult(null);
+    setMeasurement(null);
     setImpactDetected(false);
     setAnalysisProgress(0);
     setIsAnalyzing(true);
 
     try {
-      const result = await runVideoAnalysis({
+      const result = poseAvailable
+        ? await runVideoAnalysis({
         video,
-        workers,
+        workers: workers!,
         playerHeightCm: Number.parseFloat(playerHeightCm),
         playerHeightProvided,
         ballSizeId,
         calibration: referenceCalibrationRef.current,
         isCancelled: () => analysisRunIdRef.current !== runId,
         onProgress: ({ progress }) => {
-          if (analysisRunIdRef.current === runId) setAnalysisProgress(progress);
+          if (analysisRunIdRef.current === runId) setAnalysisProgress(Math.round(progress * 0.5));
         },
         onFrame: ({ observation, snapshot, frameWidth, frameHeight }) => {
           if (analysisRunIdRef.current !== runId) return;
@@ -426,15 +443,37 @@ export default function AnalyzePage() {
 
           if (snapshot.impactJustDetected) setImpactDetected(true);
         },
-      });
+          })
+        : null;
 
       if (analysisRunIdRef.current !== runId) return;
 
+      // 속도는 ballspeed 로 다시 잰다. 중력 검산을 통과한 값만 기록·공유된다.
+      let measured: Measurement | null = null;
+      if (videoFile) {
+        try {
+          measured = await analyzeVideo(videoFile, {
+            ballSize: ballSizeId,
+            onProgress: (p) => {
+              if (analysisRunIdRef.current === runId) setAnalysisProgress(50 + Math.round(p * 50));
+            },
+          });
+        } catch (error) {
+          console.error("ballspeed measurement failed", error);
+        }
+      }
+      if (analysisRunIdRef.current !== runId) return;
+
+      if (!measured && !result) throw new Error("영상을 분석하지 못했습니다.");
+      const finalResult = result
+        ? (measured ? mergeMeasurement(result, measured) : result)
+        : speedOnlyResult(measured!);
+      setMeasurement(measured);
       setIsAnalyzing(false);
-      setImpactDetected(result.impactDetected);
-      setAnalysisResult(result);
+      setImpactDetected(finalResult.impactDetected);
+      setAnalysisResult(finalResult);
       setIsPersistingAnalysis(true);
-      persistAnalysis(result).finally(() => {
+      persistAnalysis(finalResult).finally(() => {
         if (analysisRunIdRef.current === runId) setIsPersistingAnalysis(false);
       });
     } catch (error) {
@@ -443,7 +482,7 @@ export default function AnalyzePage() {
       setIsAnalyzing(false);
       alert("분석 중 오류가 발생했습니다. 다른 영상으로 다시 시도해 주세요.");
     }
-  }, [ballSizeId, isModelLoading, modelError, persistAnalysis, playerHeightCm, playerHeightProvided]);
+  }, [ballSizeId, isModelLoading, modelError, persistAnalysis, playerHeightCm, playerHeightProvided, videoFile]);
 
   const triggerDownload = (blob: Blob) => {
     const url = URL.createObjectURL(blob);
@@ -498,16 +537,9 @@ export default function AnalyzePage() {
       <header className="w-full max-w-4xl mx-auto flex flex-col gap-4 mb-12 sm:flex-row sm:items-center sm:justify-between">
         <Link href="/" className="text-gray-400 hover:text-white flex items-center gap-2 transition-colors">
           <ArrowLeft size={20} />
-          <span>Back to Home</span>
+          <span>홈으로</span>
         </Link>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <Link
-            href="/admin/references"
-            className="flex items-center justify-center gap-2 rounded-full border border-[var(--color-neon-green)]/40 px-4 py-2 text-sm font-bold text-[var(--color-neon-green)] transition-colors hover:bg-[var(--color-neon-green)]/10"
-          >
-            <Database size={16} />
-            Reference DB
-          </Link>
           <div className="font-mono text-sm tracking-widest text-[var(--color-neon-green)] flex items-center justify-center gap-2">
             {isModelLoading && <Loader2 size={14} className="animate-spin" />}
             {modelError && <AlertTriangle size={14} className="text-yellow-300" />}
@@ -517,14 +549,37 @@ export default function AnalyzePage() {
       </header>
 
       <main className="flex-1 w-full max-w-4xl mx-auto flex flex-col items-center">
-        {!videoUrl ? (
+        {isRecording ? (
+          <div className="w-full max-w-2xl mt-6 flex flex-col gap-4">
+            <h2 className="text-xl font-bold">킥 촬영</h2>
+            <KickRecorder
+              onRecorded={(file) => {
+                setIsRecording(false);
+                acceptVideoFile(file);
+              }}
+              onCancel={() => setIsRecording(false)}
+            />
+          </div>
+        ) : !videoUrl ? (
           <div className="w-full max-w-2xl mt-12 flex flex-col gap-6">
             <div className="bg-white/5 backdrop-blur-sm border border-white/20 rounded-3xl p-8 flex flex-col items-center">
-              <h2 className="text-2xl font-bold mb-2">Upload your Freekick Video</h2>
-              <p className="text-gray-400 text-sm max-w-sm text-center mb-8">
-                공과 전신이 함께 보이도록, 가급적 <strong className="text-white">측면에서</strong> 60fps 이상으로
-                촬영하세요. 정면 촬영은 구속 정확도가 크게 떨어집니다.
+              <h2 className="text-2xl font-bold mb-2">프리킥 영상 올리기</h2>
+              <p className="text-gray-400 text-sm max-w-sm text-center mb-4">
+                아래 네 가지를 지키면 대부분 측정됩니다. 하나라도 어긋나면 속도를 내보내지 않고 이유를 알려드립니다.
               </p>
+              <ul className="w-full max-w-md mb-8 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                {[
+                  ["옆에서", "공이 날아가는 방향과 직각으로. 뒤나 앞에서 찍으면 못 잽니다"],
+                  ["60fps 이상", "30fps 는 빠른 슛의 궤적이 남지 않습니다"],
+                  ["폰 고정", "들고 따라가지 말고 세워두세요"],
+                  ["킥 앞뒤 2~3초", "길게 찍을수록 엉뚱한 장면을 킥으로 볼 수 있습니다"],
+                ].map(([title, desc]) => (
+                  <li key={title} className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
+                    <div className="font-bold text-white">{title}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">{desc}</div>
+                  </li>
+                ))}
+              </ul>
 
               <div className="w-full max-w-md mb-6 flex flex-col gap-2">
                 <label className="flex items-center justify-between gap-4 rounded-xl border border-white/10 bg-black/20 px-4 py-3">
@@ -565,8 +620,8 @@ export default function AnalyzePage() {
                 </label>
 
                 <p className="px-1 text-xs text-gray-500">
-                  공 크기가 규격으로 고정돼 있어 키를 몰라도 구속이 계산됩니다. 키까지 입력하면 두 기준을 합쳐
-                  오차 범위가 좁아집니다.
+                  구속은 규격이 고정된 <strong className="text-gray-300">공 크기</strong>로 환산하고, 공중의 공이 받는
+                  중력(9.81 m/s²)과 맞는지 검산해 확인합니다. 키는 자세 분석에만 쓰이며 구속에는 영향을 주지 않습니다.
                 </p>
               </div>
 
@@ -578,11 +633,15 @@ export default function AnalyzePage() {
               )}
 
               <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
-                <label className="flex-1 flex flex-col items-center justify-center gap-3 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl p-4 cursor-pointer transition-colors group">
-                  <input type="file" accept="video/*" capture="environment" className="hidden" onChange={handleFileUpload} />
+                <button
+                  type="button"
+                  onClick={() => setIsRecording(true)}
+                  className="flex-1 flex flex-col items-center justify-center gap-3 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl p-4 transition-colors group"
+                >
                   <Camera size={30} className="text-[var(--color-neon-green)] group-hover:scale-110 transition-transform" />
-                  <span className="font-bold text-sm">카메라로 촬영</span>
-                </label>
+                  <span className="font-bold text-sm">여기서 바로 촬영</span>
+                  <span className="text-[11px] text-gray-400">구도 안내 · 60fps 요청 · 4초 자동 정지</span>
+                </button>
 
                 <label className="flex-1 flex flex-col items-center justify-center gap-3 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl p-4 cursor-pointer transition-colors group">
                   <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
@@ -663,15 +722,15 @@ export default function AnalyzePage() {
               <div className="flex flex-col sm:flex-row gap-4">
                 <button onClick={resetVideo} className="px-6 py-3 rounded-full font-bold border border-white/20 hover:bg-white/10 transition-colors flex items-center justify-center gap-2">
                   <RefreshCw size={18} />
-                  Choose Another
+                  다른 영상
                 </button>
                 <button
                   onClick={startAnalysis}
-                  disabled={isModelLoading || Boolean(modelError)}
+                  disabled={isModelLoading}
                   className="px-8 py-3 rounded-full font-bold bg-white text-black hover:scale-105 transition-transform disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {isModelLoading ? <Loader2 className="animate-spin" size={20} /> : <Play size={20} />}
-                  {isModelLoading ? "Loading AI Models" : "Start AI Analysis"}
+                  {isModelLoading ? "모델 불러오는 중" : "측정 시작"}
                 </button>
               </div>
             )}
@@ -680,21 +739,31 @@ export default function AnalyzePage() {
               <div className="w-full max-w-3xl flex flex-col gap-6 animate-in slide-in-from-bottom-8 fade-in duration-700">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div className="glass-card p-6 flex flex-col items-center text-center border-t-4 border-t-[var(--color-neon-green)] hover:-translate-y-2 transition-transform duration-300 shadow-[0_0_20px_rgba(57,255,20,0.1)] hover:shadow-[0_0_30px_rgba(57,255,20,0.3)]">
-                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">ESTIMATED SPEED</div>
-                    <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.estimatedSpeedKmh}</div>
-                    <div className="text-sm text-[var(--color-neon-green)] mt-2 font-mono font-bold tracking-widest">km/h</div>
-                    {uncertainty && analysisResult.estimatedSpeedKmh > 0 && (
-                      <div className="mt-2 text-xs font-mono text-gray-300">
-                        {uncertainty.lowKmh}–{uncertainty.highKmh} km/h · 신뢰도 {GRADE_LABEL[uncertainty.grade]}
-                      </div>
+                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">구속</div>
+                    {analysisResult.confidence === "failed" ? (
+                      <>
+                        <div className="text-3xl font-black text-yellow-300">판정 보류</div>
+                        <div className="mt-2 text-xs text-gray-300">스케일을 검증하지 못해 속도를 기록하지 않았습니다</div>
+                        <div className="mt-3 text-[10px] font-mono tracking-widest text-gray-500">
+                          아래 이유를 보고 다시 촬영해 주세요
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.estimatedSpeedKmh}</div>
+                        <div className="text-sm text-[var(--color-neon-green)] mt-2 font-mono font-bold tracking-widest">km/h</div>
+                        {uncertainty && (
+                          <div className="mt-2 text-xs font-mono text-gray-300">
+                            {uncertainty.lowKmh}–{uncertainty.highKmh} km/h · 신뢰도 {GRADE_LABEL[uncertainty.grade]}
+                          </div>
+                        )}
+                        <div className="mt-3 text-[10px] font-mono tracking-widest text-gray-500">
+                          {measurement?.gravityCheck
+                            ? `중력검산 통과 · 환산 x${measurement.gravityCheck.scaleFactor.toFixed(2)}`
+                            : `FIT ${analysisResult.trajectoryPoints}PT`}
+                        </div>
+                      </>
                     )}
-                    <div className="mt-3 text-[10px] font-mono tracking-widest text-gray-500">
-                      {analysisResult.referenceCalibration
-                        ? `REF x${analysisResult.referenceCalibration.factor.toFixed(3)}`
-                        : analysisResult.estimatedSpeedKmh > 0
-                          ? `FIT ${analysisResult.trajectoryPoints}PT`
-                          : "NOT ENOUGH BALL DATA"}
-                    </div>
                     {analysisResult.referenceDistance && analysisResult.estimatedDistanceMeters !== undefined && (
                       <div className="mt-2 text-[10px] font-mono tracking-widest text-[var(--color-neon-blue)]">
                         DIST {analysisResult.estimatedDistanceMeters.toFixed(1)} m
@@ -703,7 +772,7 @@ export default function AnalyzePage() {
                   </div>
 
                   <div className="glass-card p-6 flex flex-col items-center text-center border-t-4 border-t-[var(--color-neon-blue)] hover:-translate-y-2 transition-transform duration-300 shadow-[0_0_20px_rgba(0,255,255,0.1)] hover:shadow-[0_0_30px_rgba(0,255,255,0.3)]">
-                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">FORM SCORE</div>
+                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">자세 점수</div>
                     <div className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400 drop-shadow-sm">{analysisResult.formResult.score}</div>
                     <div className="text-sm text-[var(--color-neon-blue)] mt-2 font-mono font-bold tracking-widest">/ 100 pts</div>
                     <div className="mt-3 text-[10px] font-mono tracking-widest text-gray-500">
@@ -712,7 +781,7 @@ export default function AnalyzePage() {
                   </div>
 
                   <div className="glass-card p-6 flex flex-col items-center justify-center text-center border-t-4 border-t-purple-500 hover:-translate-y-2 transition-transform duration-300 shadow-[0_0_20px_rgba(168,85,247,0.1)] hover:shadow-[0_0_30px_rgba(168,85,247,0.3)] relative group">
-                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">KICK TYPE</div>
+                    <div className="text-gray-400 text-sm mb-2 font-mono tracking-wider">킥 유형</div>
                     <div className="text-2xl font-bold text-white group-hover:text-purple-400 transition-colors">{analysisResult.kickType}</div>
                     <button
                       onClick={handleShare}
@@ -731,6 +800,58 @@ export default function AnalyzePage() {
                     <span>
                       측정 조건이 좋지 않아 이 구속은 참고용입니다. 아래 안내를 반영해 다시 촬영하면 정확도가 올라갑니다.
                     </span>
+                  </div>
+                )}
+
+                {measurement && (
+                  <div className={`glass-card p-6 border-t-4 ${measurement.verified ? "border-t-[var(--color-neon-blue)]/60" : "border-t-yellow-400/70"}`}>
+                    <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                      <Activity size={20} className={measurement.verified ? "text-[var(--color-neon-blue)]" : "text-yellow-400"} />
+                      {measurement.verified ? "측정 검증 통과" : "속도 판정 보류"}
+                    </h3>
+                    {measurement.verified ? (
+                      <>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+                          <div>
+                            <div className="text-[10px] font-mono tracking-widest text-gray-500">발사각</div>
+                            <div className="text-xl font-bold">{measurement.launchAngleDeg !== null ? `${measurement.launchAngleDeg.toFixed(0)}°` : "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] font-mono tracking-widest text-gray-500">체공시간</div>
+                            <div className="text-xl font-bold">{measurement.flightTimeS !== null ? `${measurement.flightTimeS.toFixed(2)}초` : "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] font-mono tracking-widest text-gray-500">비행거리</div>
+                            <div className="text-xl font-bold">{measurement.straightDistanceM !== null ? `${measurement.straightDistanceM.toFixed(1)}m` : "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] font-mono tracking-widest text-gray-500">연직가속도</div>
+                            <div className="text-xl font-bold">{measurement.gravityCheck ? `${measurement.gravityCheck.measuredVerticalAccel.toFixed(1)}` : "—"}</div>
+                          </div>
+                        </div>
+                        <p className="mt-4 text-xs text-gray-400">
+                          공중의 공은 연직 가속도가 9.81 m/s² 입니다. 측정값이 여기에 맞아야 화면의 픽셀이 실제 거리로 제대로 환산된 것이라,
+                          이 검산을 통과한 기록만 저장·공유됩니다.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm text-gray-300 mb-3">
+                          이 영상으로는 속도를 믿을 만하게 잴 수 없어 기록으로 남기지 않았습니다. 아래 이유를 참고해 다시 찍어 주세요.
+                        </p>
+                        <ul className="space-y-2">
+                          {measurementNotes(measurement).slice(0, 4).map((note, index) => (
+                            <li key={index} className="flex items-start gap-3 text-sm text-yellow-100/90">
+                              <span className="text-yellow-400 mt-0.5">!</span>
+                              <span>{note}</span>
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="mt-4 text-xs text-gray-400">
+                          잘 나오는 조건: 옆에서 · 60fps · 공이 화면에서 10px 이상 · 폰 고정 · 킥 앞뒤 2초만
+                        </p>
+                      </>
+                    )}
                   </div>
                 )}
 

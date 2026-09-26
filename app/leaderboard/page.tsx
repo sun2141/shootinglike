@@ -16,9 +16,10 @@ export default async function LeaderboardPage() {
     const prisma = getPrisma();
     analyses = await prisma.analysis.findMany({
       take: 20,
+      // 구속 순위판이므로 속도가 먼저다. 저장 자체가 중력 검산을 통과한 측정만 들어온다.
       orderBy: [
-        { formScore: 'desc' },
-        { estimatedSpeedKmh: 'desc' }
+        { estimatedSpeedKmh: 'desc' },
+        { formScore: 'desc' }
       ],
       include: {
         user: true
@@ -34,10 +35,10 @@ export default async function LeaderboardPage() {
       <header className="w-full max-w-4xl mx-auto flex items-center justify-between mb-12">
         <Link href="/" className="text-gray-400 hover:text-white flex items-center gap-2 transition-colors">
           <ArrowLeft size={20} />
-          <span>Back to Home</span>
+          <span>홈으로</span>
         </Link>
         <div className="font-mono text-sm tracking-widest text-[var(--color-neon-blue)]">
-          GLOBAL RANKINGS
+          RANKINGS
         </div>
       </header>
 
@@ -47,8 +48,8 @@ export default async function LeaderboardPage() {
             <Trophy size={24} />
           </div>
           <div>
-            <h1 className="text-3xl font-bold">Top Strikers</h1>
-            <p className="text-gray-400 text-sm">Compete for the highest ball speed and best form.</p>
+            <h1 className="text-3xl font-bold">구속 순위</h1>
+            <p className="text-gray-400 text-sm">중력 검산을 통과한 측정만 올라갑니다.</p>
           </div>
         </div>
 
@@ -56,10 +57,10 @@ export default async function LeaderboardPage() {
           <table className="w-full text-left">
             <thead className="bg-white/5 border-b border-white/10">
               <tr>
-                <th className="p-4 text-sm font-medium text-gray-400">Rank</th>
-                <th className="p-4 text-sm font-medium text-gray-400">Player</th>
-                <th className="p-4 text-sm font-medium text-gray-400">Speed (Est)</th>
-                <th className="p-4 text-sm font-medium text-gray-400 text-right">Form Score</th>
+                <th className="p-4 text-sm font-medium text-gray-400">순위</th>
+                <th className="p-4 text-sm font-medium text-gray-400">닉네임</th>
+                <th className="p-4 text-sm font-medium text-gray-400">구속</th>
+                <th className="p-4 text-sm font-medium text-gray-400 text-right">폼 점수</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
@@ -80,7 +81,7 @@ export default async function LeaderboardPage() {
               }) : (
                 <tr>
                   <td colSpan={4} className="p-8 text-center text-gray-500">
-                    No records found yet. Be the first to analyze a freekick!
+                    아직 기록이 없습니다. 첫 기록을 남겨보세요.
                   </td>
                 </tr>
               )}

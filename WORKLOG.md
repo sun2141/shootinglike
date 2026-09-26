@@ -5,6 +5,300 @@
 
 ---
 
+## 2026-09-26 · Claude — 폰 동영상 테스트 페이지 (`ballspeed-downloads/ballspeed-phone.html`)
+
+앱 배포 없이 폰에서 실제 영상으로 측정을 확인하기 위한 단일 HTML.
+- `lib/ballspeed/*` 를 esbuild 로 IIFE 번들(`BallSpeed.analyzeVideo`)해 인라인 → **앱과 같은 코어, 외부 의존성 0**
+- 앨범 선택 / 카메라 촬영(파일 입력), 공 규격 선택, 진행률, 결과(속도 또는 판정 보류 + 이유),
+  궤적 오버레이(추적 오류 눈으로 확인), 진단 수치(화면2D·배율·연직가속도·SNR·fps·공 px·구도), 결과 텍스트 복사
+- claude.ai 아티팩트로도 게시(폰에서 링크로 열기). 로컬 파일은 Mac 에서 AirDrop 해도 열린다
+- 헤드리스 크로미움 검증: 합성 측면 클립(79.2 km/h) → 81.3 km/h(+2.7%), 중력검산 통과
+
+### 후속
+- 폰에서 가이드대로 찍은 클립 10~20개로 통과율 확인 → 결과 복사 텍스트를 모아 공유
+- 파일은 `public/` 이 아니라 `ballspeed-downloads/` 에 둠(Serwist precache 에 섞이지 않게)
+
+---
+
+## 2026-09-26 · Claude — `db:reset` 스크립트 Prisma 7 대응 수정
+
+첫 버전이 `new PrismaClient()` 로 만들어 "needs to be constructed with a non-empty, valid
+PrismaClientOptions" 로 죽었다. Prisma 7 은 드라이버 어댑터가 필수다. 두 가지를 고쳤다.
+- `lib/prisma.ts` 와 같은 방식으로 `PrismaPg(new Pool({connectionString}))` 어댑터 전달,
+  접속 문자열은 `.env.local` → `.env` (`prisma.config.ts` 와 같은 우선순위)
+- **ESM 으로 `import { PrismaClient } from "@prisma/client"` 하면 생성된 설정이 비어 같은 오류가 난다.**
+  번들러를 거치는 앱과 달리 스크립트는 node 가 직접 실행하므로 `createRequire` 로 CJS 로 불러온다.
+
+이 환경에서는 Neon 도메인이 막혀 DNS 에서 멈추는 것까지 확인(= 클라이언트 생성은 정상).
+실제 삭제는 Mac 에서 실행해야 한다.
+
+---
+
+## 2026-09-26 · Claude — 사용자 앱/관리자 모드 분리 + 앱 내 촬영 모드 + 기록 초기화 수단
+
+### 사용자 화면 (3개로 정리)
+- `/` 홈: Reference DB 링크 제거, 카피를 한국어로, 가이드 4칸을 실측에서 나온 기준으로 교체
+  (**"후방 대각선 권장" 문구 삭제** — 후방 구도는 원리적으로 못 잰다. 실패 137건 중 56건이 이 구도였다)
+- `/analyze`: 관리자 링크 제거, 라벨 한국어화
+- `/leaderboard`: 속도 우선 정렬(기존엔 폼 점수 우선), 한국어화, "중력 검산을 통과한 측정만" 명시
+
+### 앱 내 촬영 모드 (`components/KickRecorder.tsx`)
+찍고 나서 보류라고 말하면 늦다. 찍기 전에 잡아준다.
+- `getUserMedia` 로 후면 카메라 + **60fps 요청**(기기가 못 주면 실제 fps 를 배지로 보여주고 경고)
+- 구도 가이드 오버레이(공 위치, 가로 진행 방향), **4초 자동 정지**, 촬영 전 체크리스트
+- MediaRecorder 미지원/권한 거부 시 안내 후 '앨범에서 선택'으로 유도
+- 녹화본은 파일 업로드와 같은 경로로 분석 (`acceptVideoFile` 로 분리)
+
+### 자세 모델 없이도 측정 (`speedOnlyResult`)
+모바일에서 MediaPipe/YOLO 를 못 받아오면 **분석 자체가 막혀 있었다**. 이제 모델 실패 시
+구속만 측정하고 자세 점수만 비운다. 모델 오류 문구도 "구속 측정은 그대로 됩니다"로 수정.
+
+### 관리자 모드 (사용자 화면에서 링크하지 않음, 주소로 직접 진입)
+- `/admin` 신규: 입구 + 토큰 설정 상태 표시
+- `/admin/references` 기존 유지 — **레퍼런스 정답표는 계속 필요하다**(보정·검증의 유일한 수단)
+- `/admin/records` 신규 + `GET/DELETE /api/admin/records`: 기록 목록, 개별/전체 삭제 (x-admin-token 필요)
+
+### 기록 초기화
+`scripts/reset-leaderboard.mjs` — `npm run db:records`(확인) / `npm run db:reset -- --yes`(삭제).
+DB 는 Neon 이라 이 환경에서 직접 지울 수 없다. **사용자가 실행해야 한다.**
+User·ReferenceVideo 는 건드리지 않는다.
+
+### 확인
+`npx tsc --noEmit` 통과, eslint 오류 0(경고 3건은 복사해 온 `lib/ballspeed` 쪽 미사용 변수).
+**Mac 에서 `npm run build` 와 폰 실기기 확인 필요** (촬영 모드는 https 또는 localhost 에서만 동작).
+
+---
+
+## 2026-09-26 · Claude — 한글 파일명 버그 수정 + 전체 재측정 보고서 + /analyze 화면 정리
+
+### ballspeed
+- `safeName` 에 NFC 정규화 추가. macOS 는 한글 파일명을 자모 분리(NFD)로 저장해서
+  `학성초 프리킥.mp4` → 클립이 `__shot01.mp4` 로 생성되고 다른 한글 영상과 덮어쓰기 충돌했다.
+  이제 `학성초_프리킥_shot01.mp4`. 빈 이름이면 `clip` 으로 대체
+- out/ 재빌드 + 루트 사본 갱신 (`dist/` 는 tsc 필요해 그대로. 앱은 `lib/ballspeed` 사본 사용)
+
+### 재측정 보고서
+`/Volumes/64B/freekick/측정결과_2026-09-26.txt` — 클립 137개, 통과 3개.
+후방·정면 구도 56 · 촬영조건 미달 43 · 추적 오류 의심 26 · 궤적 짧음 9.
+
+추적 오류 26건을 들여다본 결과: 대부분 30fps 에 공이 4~8px, 화면 2D 속도가 100~450 km/h 로 이미 비현실적.
+연직 가속도가 20~277 m/s² 로 나오는데, 이를 중력에 맞추려면 환산을 x0.03~x0.3 해야 한다.
+그러려면 공 지름이 실제로는 화면의 수십 배여야 하므로 **공이 아닌 것을 따라간 것**이 맞다.
+즉 현재 밴드(x0.3~x3.5) 거부가 옳은 판단이고, 숫자로 더 보정할 여지는 없다. 검출 단계 문제다.
+
+### /analyze 화면
+- 업로드 화면: 촬영 가이드를 문장 하나에서 **체크리스트 4개**(옆에서 / 60fps / 폰 고정 / 킥 앞뒤 2~3초)로
+- 키 입력 설명 정정: 구속은 공 크기 + 중력 검산이 담당하고 키는 자세 분석에만 쓴다
+- 속도 카드: 보류일 때 **`0 km/h` 대신 "판정 보류"** 와 안내 (기존엔 0 이 그대로 보였다)
+- 통과 시 `중력검산 통과 · 환산 x1.02` 표시
+- `npx tsc --noEmit`·eslint 통과. **Mac 에서 `npm run build` 확인 필요**
+
+### 남은 일
+- 리더보드 기존 DB 에 예전 방식으로 쌓인 미검증 기록(1~61 km/h)이 그대로 있다 → 정리 필요
+- 검출 단계 개선(추적 오류 26건)은 별도 작업
+
+---
+
+## 2026-09-26 · Claude — 중력 검산 발산 버그 수정 + 깊이 성분 검증 추가 (ballspeed & 앱)
+
+IMG_0020~0027 진단에서 시작. "촬영 조건은 측정에 적합합니다" 인데 보류되던 원인 두 가지를 찾아 고쳤다.
+
+### 버그 1 — 항력 보정 반복이 발산 (`src/measure.ts`)
+`k(다음) = (G + 항력(k)) / 측정가속도` 는 k 에 대해 2차라 그대로 반복하면 터진다.
+IMG_0022 에서 expectedVerticalAccel 이 **2,896만** 까지 튀어, 측정 9.59 m/s²(거의 정확히 중력)를
+"물리적 범위 밖"으로 버렸다.
+→ 감쇠(0.5 혼합) + 12회 상한. expected 가 0.55G~1.75G 를 벗어나면 **한계값으로 자르지 않고
+항력 보정을 포기하고 순수 중력으로 검산**한다(자르면 그 값이 그대로 배율이 되어 더 나쁜 보정이 된다 —
+실측으로 확인: 자를 때 x1.79 로 200 km/h, 포기할 때 x1.02).
+
+### 버그 2 — 깊이 성분이 커도 검증을 통과
+공이 카메라 쪽/반대쪽으로 날아가면 속도의 대부분이 **공 반지름이 줄어드는 속도**에서 나온다.
+반지름은 모션블러에 가장 취약한 값인데, 중력 검산은 화면 세로축만 보므로 통과해 버린다.
+IMG_0021/0022 가 이 경로로 화면 2D 83~93 → 172~200 km/h 로 부풀었다.
+→ `depthShare`(깊이 속도 / 전체 속도) > 0.5 또는 반지름 변화 > 0.35 면 **검증 실패** 처리하고,
+촬영 조건 판정에도 "옆에서 찍어야 잴 수 있습니다" 를 넣는다. 세계기록(211) 초과·8km/h 미만도 검증 실패.
+
+### 결과 (freekick 137개 클립 재측정)
+- 검증 통과 3건: 1_shot04 94.3 (연직 10.7) / 3_shot18 92.0 (13.0) / Experiment-2_shot01 15.9 (8.9)
+  — 전부 물리적으로 납득 가능한 값. 이전 "성공 7건" 중 169.9·61.6 같은 값은 사라짐(발산이 만든 우연)
+- 실패 사유: 깊이 성분 과다 56 · 촬영조건 미달(공 4px 미만 등) 43 · 연직가속도 불일치(추적 오류 의심) 26 · 궤적 짧음 9
+- **회귀 없음**: 합성 측면 클립 95/70 km/h → 100.8 / 70.2 (수정 전과 동일)
+
+### 반영
+- `ballspeed`: `src/measure.ts`, 재빌드한 `out/ballspeed.mjs`·`out/ballspeed.html`·루트 사본
+  (이 환경에 esbuild 를 따로 깔아 빌드. `dist/` 는 tsc 가 필요해 그대로 둠 — 앱은 `lib/ballspeed` 사본을 쓰므로 무관)
+- `shooting-like`: `lib/ballspeed/*` 동기화, `npx tsc --noEmit` 통과
+
+### 남은 문제
+- 이 데이터셋의 3분의 2가 후방 구도 또는 공 4px 미만 → 촬영 가이드로 막을 영역
+- 연직가속도 불일치 26건은 추적 오류 의심. 다음 진단 대상
+- 한글 파일명 클립이 `__shot01.mp4` 로 생성되는 버그는 아직 남아 있음
+
+---
+
+## 2026-09-26 · Claude — 실제 폰 클립 37개 측정 결과 판정 (출시 블로커 발견)
+
+드라이브 freekick 폴더 37개 영상 · 킥 133개 → **측정 성공 7개(5%)**.
+
+### 블로커: 조건이 적합한 영상도 전부 보류
+IMG_0020~0027, IMG_0528 (**1920x1080 60fps, 킥 1개, 5~14초 — 앱이 노리는 딱 그 조건**) 8개가
+전부 `판정 보류 — 촬영 조건은 측정에 적합합니다`. 즉 **촬영 문제가 아니라 측정·검산 단계 실패**인데
+보고서에 이유가 안 나온다. 제대로 찍은 사용자도 결과를 못 받는다는 뜻 → 최우선 진단 대상.
+(보고서가 quality verdict 만 찍고 gravityCheck/curvatureSnr 실패 사유를 안 보여주는 것도 같이 고칠 것)
+
+### 나머지 보류는 대체로 정당
+30fps 27개, 공 지름 4px 미만 다수(480x480·400x224 포함), 후방 구도 9개. 앱 촬영 가이드로 막을 영역.
+
+### 의심스러운 성공값
+`1_shot10` 169.9 km/h (30fps, 신뢰도 0.47) — 아마추어 영상에서 나오기 어려운 값.
+`Experiment-2_shot01` 15.9 (이미 궤적 오버레이가 입혀진 데모 영상). 검증 통과 문턱이 느슨할 가능성.
+
+### 부수 버그
+한글 파일명(`학성초 프리킥.mp4`)의 클립이 `__shot01.mp4` 로 생성 — 이름이 뭉개져 다른 한글 영상과 충돌한다.
+
+### 다음
+IMG_0020~0027 을 `~/shooting-videos` 로 복사받아 `--debug` 로 실패 원인 확인 (궤적 길이 / curvatureSnr / 추적 대상)
+
+---
+
+## 2026-09-26 · Claude — 유튜브 정답 17건 입력 결과: 쓸 수 있는 쌍 0건
+
+원장 81클립 중 검증 통과 3건, 정답 39건(화면 표시 17 + 이전 제목 주장 22).
+**겹치는 게 하나도 없다** — 정답이 붙은 클립은 전부 판정 보류, 통과한 3건에는 정답이 없다.
+
+원인: 한 영상이 5~20 클립으로 잘리는데 정답은 킥 하나의 값이다. 같은 값이 여러 클립에 붙어
+어느 것이 그 킥인지 구분되지 않는다. raw 2D 대비 정답 비율이 x0.39~x3.04 로 흩어진 것도 같은 이유.
+
+- 보강: 정답 입력 페이지에 "그 킥의 클립 한 곳에만" 경고 추가, `apply_truth.mjs` 가 같은 값이
+  여러 클립에 붙으면 경고
+- 판단: **방송·하이라이트 유튜브로는 보정 데이터를 못 만든다.** 10개 영상을 돌려 수확 0.
+  ballspeed 는 중력 검산으로 영상마다 스스로 스케일을 잡으므로 출시에 정답표가 필수는 아니다.
+- 다음: 사용자의 실제 폰 클립(드라이브 freekick 36개)을 로컬에서 ballspeed 로 돌려 통과율·경고를 본다.
+  업로드 10MB 제한이 문제였는데 로컬 실행이면 제한이 없다
+
+---
+
+## 2026-09-23 · Claude — 스피드건 없이 레퍼런스 만들기 + 앱 측정 경로를 ballspeed 로 교체
+
+### 정답 수집 방식 결정
+스피드건 사용 불가 → **화면에 속도가 표시된 영상**만 정답으로 쓴다.
+OCR 자동 판독은 실패(레이더 LCD 는 tesseract 가 못 읽음 — 106.5 표시 프레임에서 전부 오판독).
+→ **사람이 숫자만 치는 반자동 방식**으로 전환.
+
+- `scripts/truth_frames.py` — 영상 전 구간을 2초 간격 프레임 띠로 만들고, 클립별 측정값과 나란히 놓은
+  `_truth/index.html` 생성. 값 입력 후 `truth.csv` 내려받기. `--no-ocr` 로 자동 판독 생략(기본 권장),
+  OCR 을 켜면 방송 자막처럼 선명한 숫자에는 ● 표시가 붙는다
+- `scripts/apply_truth.mjs` — truth.csv 를 원장에 기록하고 편향·중앙오차·제안 계수 출력
+- 실행: 영상 10개 → 프레임 169장, `~/shooting-videos/_truth/index.html` (2.1MB)
+
+### 앱 (`/analyze`)
+- `lib/ballspeed/` 추가 (ballspeed src 에서 node 전용 파일 제외, 상대 import 의 `.js` 제거)
+- 속도는 이제 **ballspeed 가 측정**한다. 기존 포즈 파이프라인은 자세 피드백·오버레이용으로 유지
+- `lib/analysis/merge-measurement.ts` — 중력 검산 통과 못 하면 `confidence: "failed"` →
+  기존 `persistAnalysis` 가 저장을 막으므로 **리더보드·공유에 미검증 값이 들어가지 않는다**
+- 결과 화면에 발사각·체공시간·비행거리·연직가속도 카드 추가, 보류 시 이유와 재촬영 조건 안내
+- 진행률: 포즈 0~50%, ballspeed 50~100%
+- 확인: `npx tsc --noEmit` 통과, eslint 통과. **이 환경에선 next build 불가(네이티브 바이너리가 macOS용) → Mac에서 빌드·실물 확인 필요**
+
+### 영향 파일
+`lib/ballspeed/*`, `lib/analysis/merge-measurement.ts`, `app/analyze/page.tsx`,
+`scripts/truth_frames.py`, `scripts/apply_truth.mjs`, `package.json`
+
+---
+
+## 2026-09-23 · Claude — 유튜브 실영상 10개 측정 결과 + jev-collect 정답 기록 방식 수정
+
+### 결과 (keep 상위 10개 → ballspeed)
+- 클립 81개로 분할, **검증 통과 3개(4%)**. 영상 하나가 5~20 클립으로 잘림 — 리플레이·카메라 전환·줌을 킥으로 봄
+- 통과한 3개도 신뢰 어려움: Ronny 영상 115.8 km/h(제목 주장 200 km/h대의 절반), "221 km/h" 영상 61.1.
+  방송 영상은 공이 카메라 쪽/반대쪽으로 날아가고 줌·팬이 있어 **공 크기 스케일 + 중력 검산이 통과해도 틀릴 수 있음**
+- 결론: 유튜브 방송·하이라이트 영상은 폰 측면 촬영용 앱의 정답/보정 데이터로 **부적합**. Jev 필터는 제대로 작동했고, 문제는 소스 자체
+
+### 수정 (`scripts/jev-collect.mjs`)
+- 이전 실행이 제목 구속을 영상의 **모든 클립(31개)**에 정답으로 붙였음 → 잘못. 원장 오염
+- 기본값을 "원장에 넣지 않음"으로 변경, 실행 시 이전 title-claim 정답 자동 삭제
+- `--truth-from-title` 로 켜도 검증 통과 클립이 정확히 1개인 영상에만 붙임
+- 이번 원장은 통과 클립과 정답이 겹친 게 없어 보정 계수에는 영향 없었음
+
+---
+
+## 2026-09-23 · Claude — Jev 선별 → ballspeed 측정 연결 (`scripts/jev-collect.mjs`)
+
+- `jev-filter-out*/results.json`의 keep 영상(우선순위 순, 기본 상위 10) → yt-dlp(ballspeed와 같은 60fps 우선 포맷,
+  `<videos>/<id>.mp4`, 이미 받은 건 건너뜀) → `~/ballspeed/out/ballspeed.mjs`로 선별·분할·측정·원장
+- 제목 구속(30~215 km/h)을 ballspeed `--truth`로 원장에 기록, `truthSource: "title-claim"` 으로 표시(미검증 주장)
+- 비교 보고 `collect-report.txt`: 영상별 킥 수, 측정값, 제목 대비 오차, 중앙 절대오차
+- 기본 경로: 영상 `~/shooting-videos`, ballspeed `~/ballspeed/out/ballspeed.mjs`. ballspeed 코드는 수정 안 함
+- 검증: 합성 영상 2개(95/70 km/h) → 100.8(+6.1%)/70.2, 파일 없는 영상은 "다운로드 실패"로 보고. 순수 로직 테스트 추가
+- 영향: `scripts/jev-collect.mjs`, `scripts/test-jev-collect.mjs`, `package.json`(jev:collect, test:jev)
+- 후속: Mac에서 실제 유튜브 영상으로 실행(yt-dlp·ffmpeg 필요)
+
+---
+
+## 2026-09-22 · Claude — Jev 필터 2차 실측 (코드 변경 없음)
+
+- 영문 "free kick speed km/h" 20개: 질문 수정 후 **전부 keep**. 과장 제목 영상의 real_footage 0.28→0.52, 0.41→0.63 로 회복
+- 국문 "프리킥" 30개: keep 19 / review 1 / reject 10. 강의·원리 설명 8개를 0.9 이상 확률로 reject,
+  경기 하이라이트 1개 reject, 20분 초과 1개 규칙 reject. 눈으로 본 오분류 없음
+- 경계: 10~14분짜리 "프리킥 대결" 브이로그가 shot_compilation 으로 keep(우선순위 0.28~0.32로 하위)
+- 현재 임계값 유지. 후속: keep 영상을 받아 자동 선별·측정 파이프라인에 넣어 실제 킥 검출률 확인
+
+---
+
+## 2026-09-22 · Claude — Jev 필터 1차 실측 반영
+
+실측(검색 "free kick speed km/h", 20개): keep 16 / review 3 / reject 1, 2.3s, 약 $0.0007.
+- 문제: `real_footage`가 **과장된 속도 주장(230·266 km/h)을 보고 실제 영상도 가짜로 의심**
+  (0.41~0.53, Hami Mandirali 실제 영상이 game으로 reject). → 질문에 "매체만 판단, 속도 주장 신빙성은 판단 말 것" 명시
+- 제목 구속은 코드로 파싱(`parseTitleSpeed`: km/h·kph·kp/h·/H·mph) 후 215km/h 초과 → 비현실(?!) 표시.
+  그럴듯한 keep 영상만 `reference-candidates.csv`(url, km/h, 제목) 로 출력 → 정답 레퍼런스 후보
+- 중복 영상 제거(`dedupe`), priority 0~1 정규화
+- 영향: `scripts/jev-filter.mjs`, `scripts/test-jev-filter.mjs`
+- 후속: 재실행으로 real_footage 개선 확인. 제목 구속은 업로더 주장일 뿐 → 레퍼런스 투입 전 영상 속 표시와 대조 필요
+
+---
+
+## 2026-09-22 · Claude — Jev 수집 전 필터 스크립트 추가 (`scripts/jev-filter.mjs`)
+
+### 무엇
+유튜브 후보 영상을 **다운로드 전에** 제목·채널·길이·설명만 보고 TypeSafe Jev로 선별. 의존성 0 (HTTP API 직접 호출).
+- 입력: `--search "검색어" --limit N`(yt-dlp 필요) / `--input 파일|-`(yt-dlp -J, JSON 배열, JSONL)
+- 출력(`jev-filter-out/`): `results.json`(원시 확률 보존), `keep.txt`(→ `yt-dlp -a`), `review.txt`
+
+### 판단 구조 (요청 1회에 질문 3개)
+- `content`(choice): single_shot_clip / shot_compilation / match_highlights / tutorial_or_talk / not_football_kicks
+- `real_footage`(noul): 실제 촬영 vs 게임(FIFA/EA FC)·애니메이션
+- `speed_shown`(noul): 구속 표시 여부 → 정답 있는 레퍼런스 후보 우선순위
+- 정책은 코드(`POLICY`): 20분 초과·제목 없음은 API 호출 없이 reject / 실제촬영 <0.3 reject /
+  슛확률 ≥0.6 & 실제촬영 ≥0.5 keep / 슛확률 ≥0.3 review. **임계값은 실데이터로 아직 미검증.**
+- 키 없으면 규칙만 적용하고 전부 keep. 401은 전체 중단, 429/5xx 지수 백오프, 기타 오류는 review.
+
+### 영향 파일
+`scripts/jev-filter.mjs`, `scripts/test-jev-filter.mjs`, `package.json`(jev:filter, test:jev), `.gitignore`
+
+### 후속
+- 실제 API 호출 테스트 미실시(작업 환경 네트워크 차단). Mac에서 `npm run jev:filter -- --search "free kick speed" --limit 20` 로 확인 필요
+- 결과 20~50개를 사람이 라벨링해 임계값 조정
+
+---
+
+## 2026-09-22 · Codex — TypeSafe 스킬 설치
+
+- 변경: 요청한 `npx skills add typesafe-ai/skills --skill typesafe-ai` 실행 완료. 프로젝트 범위에 `typesafe-ai` 스킬 설치.
+- 영향 파일: `.agents/skills/typesafe-ai/SKILL.md`, `.agents/skills/typesafe-ai/LICENSE`, `skills-lock.json`, `WORKLOG.md`
+- 검증: 설치 명령 종료 코드 0, 스킬 파일 및 잠금 파일 생성 확인.
+- 후속: 다음 대화 턴부터 스킬 사용 가능. API 키 설정은 별도 작업.
+
+---
+
+## 2026-09-22 · Claude — AGENTS.md에 TypeSafe(Jev) 스킬 규칙 추가
+
+- 변경: `AGENTS.md`에 "TypeSafe / Jev" 섹션 추가 (스킬 사용, 적용 범위, `TYPESAFE_API_KEY` 규칙)
+- 영향 파일: `AGENTS.md`
+- 후속: Codex 쪽 `typesafe-ai` 스킬 설치, `.env.local`에 `TYPESAFE_API_KEY` 추가(사용자)
+
+---
+
 ## 2026-08-11 · Claude — 공 지름을 고정 크기 스케일 기준으로 추가 (키 없이 구속 산출)
 
 ### 배경
