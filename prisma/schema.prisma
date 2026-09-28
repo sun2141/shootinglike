@@ -71,3 +71,82 @@ model ReferenceVideo {
 
   @@index([isActive, createdAt])
 }
+
+// ---------------------------------------------------------------------------
+// refauto — 프리킥 레퍼런스 자동 작업 (scripts/refauto → /admin/refauto)
+// 분석은 영상이 있는 Mac 에서 하고, 결과·이미지를 여기로 올린다.
+// ---------------------------------------------------------------------------
+
+/// 영상 1개. id = 영상 지문(앞 4MB + 크기) — 이름이 바뀌어도 같은 영상이면 같은 id
+model RefautoVideo {
+  id          String        @id
+  file        String
+  status      String        // freekick | not_freekick | error
+  reason      String?
+  meta        Json?         // 영상별 정보 (키커 키, 골대 규격, 공 호수 …)
+  info        Json?         // 해상도·fps·길이
+  processedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  kicks       RefautoKick[]
+}
+
+/// 킥 1개의 계산 결과
+model RefautoKick {
+  id              String       @id @default(cuid())
+  videoId         String
+  video           RefautoVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  kick            Int
+  status          String       // A | B | review | manual | rejected | not_measurable
+  source          String       @default("auto")
+  reasons         Json?
+  notes           Json?
+  speedKmh        Float?
+  elevDeg         Float?
+  distM           Float?
+  rmsPx           Float?
+  trackPoints     Int?
+  data            Json?        // 보정·골대·더미·좌표 기준 등 화면에 필요한 나머지
+  overlayImageId  String?
+  frameImageId    String?
+  candidateFrames Json?        // [{n, imageId}] 키커를 찍을 수 있는 다른 장면들
+  referenceId     String?      // ReferenceVideo 로 등록했으면 그 id
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@unique([videoId, kick])
+  @@index([status])
+}
+
+/// 확인 이미지. id = 내용의 sha1 (같은 이미지는 한 번만 저장)
+model RefautoImage {
+  id        String   @id
+  mime      String
+  bytes     Bytes
+  width     Int?
+  height    Int?
+  createdAt DateTime @default(now())
+}
+
+/// 관리자 화면에서 남긴 수정 요청. Mac 워커가 가져가 처리하고 done 으로 바꾼다
+model RefautoEdit {
+  id        String    @id @default(cuid())
+  videoId   String
+  kick      Int
+  action    String    // accept | reject | recompute
+  meta      Json?
+  clicks    Json?
+  status    String    @default("pending") // pending | done | failed
+  result    String?
+  createdAt DateTime  @default(now())
+  doneAt    DateTime?
+
+  @@index([status, createdAt])
+}
+
+/// 워커 상태(마지막 동기화), 수동 분석 레퍼런스 목록 같은 작은 값
+model RefautoState {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}

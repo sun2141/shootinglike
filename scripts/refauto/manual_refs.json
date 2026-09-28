@@ -1,0 +1,16 @@
+[
+ {"file": "04.MP4", "kick": 1, "status": "manual", "speed_kmh": 80.9, "elev_deg": 20.7, "dist_m": 20.6, "t_kick": 0.634, "t_end": 1.852, "goal_cross_z": 4.72,
+  "kicker_cm": 182, "result": "크로스바 위로 넘어감", "method": "골대+페널티 라인·아크+키커 182cm+더미 160cm 보정, f 1364px"},
+ {"file": "05.MP4", "kick": 1, "status": "manual", "speed_kmh": 68.4, "elev_deg": 24.2, "dist_m": 20.5, "t_kick": 1.829, "t_end": 3.349, "goal_cross_z": 2.49,
+  "kicker_cm": 182, "result": "크로스바 윗면에 맞음 (도착 시각 관측과 12ms 차이)", "method": "04 와 같은 삼각대 보정"},
+ {"file": "08.MP4", "kick": 1, "status": "manual", "speed_kmh": 83.0, "elev_deg": 16.0, "dist_m": 26.5, "t_kick": 5.784, "t_end": 7.388, "goal_cross_z": 1.88,
+  "kicker_cm": 172, "result": "오른쪽 위 구석 골", "method": "골대+라인·아크+더미 2개+키커 3명 보정, f 1426px"},
+ {"file": "09.MP4", "kick": 1, "status": "manual", "speed_kmh": 88.0, "elev_deg": 18.2, "dist_m": 26.6, "t_kick": 1.304, "t_end": 2.656, "goal_cross_z": 4.18,
+  "kicker_cm": 182, "result": "크로스바 위로 넘어감", "method": "08 과 같은 삼각대 보정"},
+ {"file": "11.MP4", "kick": 1, "status": "manual", "speed_kmh": 81.9, "elev_deg": 14.9, "dist_m": 26.4, "t_kick": 4.549, "t_end": 6.005, "goal_cross_z": null,
+  "kicker_cm": 172, "result": "골문 앞 바운드 후 골", "method": "08 과 같은 삼각대 보정"},
+ {"file": "07.MOV", "kick": 1, "status": "B", "speed_kmh": 100.0, "speed_range": [85, 102], "elev_deg": 16.1, "dist_m": 22.6, "t_kick": 0.377, "t_end": 1.335, "goal_cross_z": 2.67,
+  "kicker_cm": null, "result": "크로스바 윗면 맞고 튐", "method": "골대 3모서리+더미 4개+공 크기, 초점거리는 골에어리어 선·벽 9.15m 가정. 추정값"},
+ {"file": "06.MP4", "kick": 1, "status": "B", "speed_kmh": 47.0, "speed_range": [43, 50], "elev_deg": 33.0, "dist_m": 13.5, "t_kick": 2.21, "t_end": 3.492, "goal_cross_z": null,
+  "kicker_cm": null, "result": "키퍼 캐치", "method": "유소년 5x2 골대·4호 공 가정, 손으로 든 패닝 영상. 추정값"}
+]

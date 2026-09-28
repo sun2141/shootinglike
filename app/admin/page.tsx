@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowLeft, Database, ListOrdered, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Database, ListOrdered, ShieldCheck, Video } from "lucide-react";
 import { getAdminReferenceTokenStatus } from "@/lib/admin-auth";
 
 /**
@@ -55,6 +55,19 @@ export default function AdminHome() {
             <div className="text-lg font-bold">레퍼런스 정답표</div>
             <p className="text-sm text-gray-400 mt-1">
               속도를 아는 영상을 넣어 측정값과 비교하고, 편향·보정 계수를 확인합니다.
+            </p>
+          </div>
+        </Link>
+
+        <Link
+          href="/admin/refauto"
+          className="glass-card flex items-start gap-4 p-6 transition-transform hover:-translate-y-1"
+        >
+          <Video size={24} className="mt-1 text-[var(--color-neon-pink)]" />
+          <div>
+            <div className="text-lg font-bold">프리킥 레퍼런스 자동 작업</div>
+            <p className="text-sm text-gray-400 mt-1">
+              Mac 이 영상 폴더를 분석해 올린 결과를 보고 확정·제외·수정합니다. Mac 이 꺼져 있어도 됩니다.
             </p>
           </div>
         </Link>
