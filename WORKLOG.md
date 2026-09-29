@@ -14,6 +14,7 @@
 - 워커 `scripts/refauto/cloud.py` (`refauto.py <폴더> --cloud`), 자동 실행 `install_launchd.sh` (5분 + 폴더 감시)
 - pipeline: 후보 프레임 6장(`frames/<이름>_k<n>_f<i>.jpg`, 고정 카메라만), `coord_w` 기록
 - 검증: tsc·eslint 통과. **실제 DB·배포 환경에서는 아직 안 돌려 봄**
+- 09-30 수정: Mac conda base 의 scipy 가 liblapack 누락으로 깨짐 → 전용 venv(`scripts/refauto/.venv`) 권장, install_launchd.sh 가 venv 우선 사용. 실수로 커밋된 `__pycache__` 제거 + .gitignore
 - 후속: 커밋·푸시 → Vercel 에 ADMIN_REFERENCE_TOKEN 확인 → Mac 에서 `--cloud` 1회 → `install_launchd.sh`. 이미지가 Postgres 에 쌓이므로 용량 확인
 
 ---

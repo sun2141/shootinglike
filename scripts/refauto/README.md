@@ -4,9 +4,14 @@
 결과를 폴더 안 `_refauto/` 에 쌓는다. 자신 없는 킥은 확인 페이지에서 몇 번 클릭해 바로잡는다.
 
 ## 준비 (한 번)
+전용 가상환경을 쓴다 (conda base 등에 섞어 깔면 scipy 가 `liblapack.3.dylib` 를 못 찾는 식으로 깨질 수 있다).
 ```bash
-pip3 install -r scripts/refauto/requirements.txt      # numpy, scipy, opencv
+/usr/bin/python3 -m venv scripts/refauto/.venv
+scripts/refauto/.venv/bin/pip install -U pip
+scripts/refauto/.venv/bin/pip install -r scripts/refauto/requirements.txt
 ```
+이후 실행은 `scripts/refauto/.venv/bin/python3 scripts/refauto/refauto.py ...`. `install_launchd.sh` 는 이 가상환경이 있으면 자동으로 쓴다
+(다른 python 을 쓰려면 `REFAUTO_PYTHON=/경로/python3`).
 ffmpeg(ffprobe)가 있으면 fps·회전 정보를 더 정확히 읽는다 (없어도 동작).
 
 ## 쓰는 법

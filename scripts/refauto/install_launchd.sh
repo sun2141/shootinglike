@@ -18,10 +18,14 @@ fi
 
 FOLDER="${1:?영상 폴더 경로를 주세요. 예: /Volumes/64B/freekick}"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-PY="$(command -v python3)"
+VENV_PY="$REPO/scripts/refauto/.venv/bin/python3"
+if [[ -n "${REFAUTO_PYTHON:-}" ]]; then PY="$REFAUTO_PYTHON"
+elif [[ -x "$VENV_PY" ]]; then PY="$VENV_PY"
+else PY="$(command -v python3)"; fi
+echo "사용할 python: $PY"
 FFDIR="$(dirname "$(command -v ffprobe 2>/dev/null || echo /opt/homebrew/bin/ffprobe)")"
 
-"$PY" -c "import numpy, scipy, cv2" || { echo "먼저: pip3 install -r scripts/refauto/requirements.txt"; exit 1; }
+"$PY" -c "import numpy, scipy, cv2" || { echo "numpy/scipy/opencv 를 불러오지 못했습니다. README 의 준비(전용 가상환경) 를 먼저 하세요."; exit 1; }
 grep -q "^ADMIN_REFERENCE_TOKEN=" "$REPO/.env.local" 2>/dev/null || echo "주의: $REPO/.env.local 에 ADMIN_REFERENCE_TOKEN 이 없습니다 (동기화가 안 됩니다)."
 
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"

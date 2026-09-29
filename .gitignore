@@ -47,3 +47,7 @@ next-env.d.ts
 # jev-filter 출력
 /jev-filter-out*/
 ref-rear/
+
+# refauto
+__pycache__/
+scripts/refauto/.venv/
