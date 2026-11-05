@@ -82,7 +82,7 @@ export default function AdminRecordsPage() {
   );
 
   return (
-    <div className="min-h-screen flex flex-col p-8">
+    <div className="min-h-screen flex flex-col px-4 py-6 sm:p-8">
       <header className="w-full max-w-4xl mx-auto flex items-center justify-between mb-8">
         <Link href="/admin" className="text-gray-400 hover:text-white flex items-center gap-2">
           <ArrowLeft size={20} />
@@ -149,7 +149,7 @@ export default function AdminRecordsPage() {
           </button>
         </div>
 
-        <div className="glass-card overflow-hidden">
+        <div className="glass-card overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead className="bg-white/5 border-b border-white/10">
               <tr>
@@ -168,7 +168,7 @@ export default function AdminRecordsPage() {
                       {new Date(r.createdAt).toLocaleString("ko-KR")}
                     </td>
                     <td className="p-3">{r.nickname ?? "-"}</td>
-                    <td className="p-3 font-mono text-[var(--color-neon-green)]">{r.estimatedSpeedKmh} km/h</td>
+                    <td className="p-3 font-mono text-[var(--color-neon-green)] whitespace-nowrap">{r.estimatedSpeedKmh} km/h</td>
                     <td className="p-3 font-mono text-[var(--color-neon-blue)]">{r.formScore}</td>
                     <td className="p-3 text-right">
                       <button

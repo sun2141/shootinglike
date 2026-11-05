@@ -34,7 +34,7 @@ export default async function LeaderboardPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col p-8 relative">
+    <div className="min-h-screen flex flex-col px-4 py-6 sm:p-8 relative">
       <header className="w-full max-w-4xl mx-auto flex items-center justify-between mb-12">
         <Link href="/" className="text-gray-400 hover:text-white flex items-center gap-2 transition-colors">
           <ArrowLeft size={20} />
@@ -51,7 +51,7 @@ export default async function LeaderboardPage() {
             <Trophy size={24} />
           </div>
           <div>
-            <h1 className="text-3xl font-bold">구속 순위</h1>
+            <h1 className="text-2xl sm:text-3xl font-bold">구속 순위</h1>
             <p className="text-gray-400 text-sm">중력 검산을 통과한 측정만 올라갑니다.</p>
           </div>
         </div>
@@ -60,10 +60,10 @@ export default async function LeaderboardPage() {
           <table className="w-full text-left">
             <thead className="bg-white/5 border-b border-white/10">
               <tr>
-                <th className="p-4 text-sm font-medium text-gray-400">순위</th>
-                <th className="p-4 text-sm font-medium text-gray-400">닉네임</th>
-                <th className="p-4 text-sm font-medium text-gray-400">구속</th>
-                <th className="p-4 text-sm font-medium text-gray-400 text-right">폼 점수</th>
+                <th className="p-3 sm:p-4 text-sm font-medium text-gray-400 whitespace-nowrap">순위</th>
+                <th className="p-3 sm:p-4 text-sm font-medium text-gray-400">닉네임</th>
+                <th className="p-3 sm:p-4 text-sm font-medium text-gray-400 whitespace-nowrap">구속</th>
+                <th className="p-3 sm:p-4 text-sm font-medium text-gray-400 text-right whitespace-nowrap">폼</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
@@ -71,14 +71,14 @@ export default async function LeaderboardPage() {
                 const i = index + 1;
                 return (
                   <tr key={analysis.id} className="hover:bg-white/5 transition-colors">
-                    <td className="p-4">
+                    <td className="p-3 sm:p-4">
                       <span className={`font-mono text-lg font-bold ${i === 1 ? 'text-yellow-400' : i === 2 ? 'text-gray-300' : i === 3 ? 'text-amber-600' : 'text-gray-500'}`}>
                         #{i}
                       </span>
                     </td>
-                    <td className="p-4 font-medium">{analysis.user?.nickname || 'Unknown Player'}</td>
-                    <td className="p-4 font-mono text-[var(--color-neon-green)]">{analysis.estimatedSpeedKmh} km/h</td>
-                    <td className="p-4 text-right font-mono text-[var(--color-neon-blue)]">{analysis.formScore} pts</td>
+                    <td className="p-3 sm:p-4 font-medium break-all">{analysis.user?.nickname || 'Unknown Player'}</td>
+                    <td className="p-3 sm:p-4 font-mono text-[var(--color-neon-green)] whitespace-nowrap">{analysis.estimatedSpeedKmh} km/h</td>
+                    <td className="p-3 sm:p-4 text-right font-mono text-[var(--color-neon-blue)] whitespace-nowrap">{analysis.formScore}</td>
                   </tr>
                 )
               }) : (

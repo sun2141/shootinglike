@@ -12,8 +12,8 @@ export default function AdminHome() {
   const { configured, developmentOpen } = getAdminReferenceTokenStatus();
 
   return (
-    <div className="min-h-screen flex flex-col p-8">
-      <header className="w-full max-w-3xl mx-auto flex items-center justify-between mb-10">
+    <div className="min-h-screen flex flex-col p-4 sm:p-8">
+      <header className="w-full max-w-3xl mx-auto flex items-center justify-between mb-6 sm:mb-10">
         <Link href="/" className="text-gray-400 hover:text-white flex items-center gap-2 transition-colors">
           <ArrowLeft size={20} />
           <span>앱으로</span>
@@ -23,7 +23,7 @@ export default function AdminHome() {
 
       <main className="w-full max-w-3xl mx-auto flex flex-col gap-6">
         <div>
-          <h1 className="text-3xl font-bold mb-2">관리자 모드</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold mb-2">관리자 모드</h1>
           <p className="text-gray-400 text-sm">
             레퍼런스 정답표와 기록을 다루는 화면입니다. 사용자 화면에는 노출되지 않습니다.
           </p>
@@ -48,7 +48,7 @@ export default function AdminHome() {
 
         <Link
           href="/admin/references"
-          className="glass-card flex items-start gap-4 p-6 transition-transform hover:-translate-y-1"
+          className="glass-card flex items-start gap-4 p-4 sm:p-6 transition-transform hover:-translate-y-1"
         >
           <Database size={24} className="mt-1 text-[var(--color-neon-green)]" />
           <div>
@@ -61,7 +61,7 @@ export default function AdminHome() {
 
         <Link
           href="/admin/refauto"
-          className="glass-card flex items-start gap-4 p-6 transition-transform hover:-translate-y-1"
+          className="glass-card flex items-start gap-4 p-4 sm:p-6 transition-transform hover:-translate-y-1"
         >
           <Video size={24} className="mt-1 text-[var(--color-neon-pink)]" />
           <div>
@@ -74,7 +74,7 @@ export default function AdminHome() {
 
         <Link
           href="/admin/records"
-          className="glass-card flex items-start gap-4 p-6 transition-transform hover:-translate-y-1"
+          className="glass-card flex items-start gap-4 p-4 sm:p-6 transition-transform hover:-translate-y-1"
         >
           <ListOrdered size={24} className="mt-1 text-[var(--color-neon-blue)]" />
           <div>
@@ -84,7 +84,37 @@ export default function AdminHome() {
             </p>
           </div>
         </Link>
+        <section className="glass-card p-4 sm:p-6">
+          <h2 className="text-sm font-bold text-gray-300 mb-3">페이지 주소</h2>
+          <ul className="flex flex-col divide-y divide-white/5 text-sm">
+            {PAGES.map(([href, name, who]) => (
+              <li key={href}>
+                <Link href={href} className="flex items-center justify-between gap-3 py-2.5 hover:text-white text-gray-300">
+                  <span className="min-w-0">
+                    <span className="block">{name}</span>
+                    <span className="block font-mono text-xs text-gray-500 break-all">{href}</span>
+                  </span>
+                  <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${who === "관리자" ? "border-[var(--color-neon-pink)]/40 text-[var(--color-neon-pink)]" : "border-white/15 text-gray-400"}`}>
+                    {who}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
       </main>
     </div>
   );
 }
+
+/** 사이트의 화면 주소 (docs/PAGES.md 와 같이 고친다) */
+const PAGES: [string, string, "사용자" | "관리자"][] = [
+  ["/", "홈", "사용자"],
+  ["/analyze", "구속 측정 (옆에서 찍은 영상)", "사용자"],
+  ["/analyze/freekick", "프리킥 측정 (대각선 뒤, 베타)", "사용자"],
+  ["/leaderboard", "구속 순위", "사용자"],
+  ["/admin", "관리자 입구 (이 화면)", "관리자"],
+  ["/admin/refauto", "프리킥 레퍼런스 자동 작업 (Mac 워커 결과)", "관리자"],
+  ["/admin/references", "레퍼런스 정답표", "관리자"],
+  ["/admin/records", "기록 관리", "관리자"],
+];

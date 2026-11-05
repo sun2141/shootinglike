@@ -11,6 +11,7 @@ import { ArrowLeft, Check, Cpu, Loader2, Pencil, RefreshCw, Upload, X } from "lu
  */
 
 const ADMIN_TOKEN_STORAGE_KEY = "freekickAdminReferenceToken";
+const PAGE = 12;
 
 type Kick = {
   id: string;
@@ -92,7 +93,7 @@ export default function RefautoAdminPage() {
     }
   });
   const [data, setData] = useState<Payload | null>(null);
-  const [tab, setTab] = useState<Tab>("review");
+  const [tabSel, setTab] = useState<Tab | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [editing, setEditing] = useState<Item | null>(null);
@@ -141,6 +142,9 @@ export default function RefautoAdminPage() {
     return c;
   }, [items, data]);
 
+  // 탭을 고르기 전에는: '확인 필요'가 비어 있으면 손볼 것이 많은 '측정 불가'(없으면 전체)를 보여 준다
+  const tab: Tab = tabSel ?? (counts.review || !data ? "review" : counts.not_measurable ? "not_measurable" : "all");
+
   const pending = useMemo(() => {
     const m = new Map<string, Edit>();
     for (const e of data?.edits ?? []) if (e.status === "pending") m.set(`${e.videoId}#${e.kick}`, e);
@@ -167,7 +171,10 @@ export default function RefautoAdminPage() {
     [headers, load]
   );
 
-  const shown = useMemo(() => (tab === "all" ? items : items.filter((i) => i.status === tab)), [items, tab]);
+  const filtered = useMemo(() => (tab === "all" ? items : items.filter((i) => i.status === tab)), [items, tab]);
+  // 휴대폰 데이터·DB 읽기를 아끼려고 카드(이미지)는 12개씩만 띄운다
+  const [limit, setLimit] = useState(PAGE);
+  const shown = useMemo(() => filtered.slice(0, limit), [filtered, limit]);
   const worker = data?.state.worker;
 
   // 이미지는 토큰 헤더가 필요해서 fetch → blob URL 로 띄운다 (보이는 것만)
@@ -219,7 +226,7 @@ export default function RefautoAdminPage() {
               } catch {}
             }}
             placeholder="관리자 토큰"
-            className="rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm w-56"
+            className="rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-base sm:text-sm flex-1 min-w-0 sm:flex-none sm:w-56"
           />
           <button onClick={() => void load()} className="flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm hover:bg-white/5">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} 새로고침
@@ -233,12 +240,15 @@ export default function RefautoAdminPage() {
         </div>
         {message && <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">{message}</div>}
 
-        <div className="flex flex-wrap gap-2">
+        <div className="-mx-4 px-4 flex gap-2 overflow-x-auto whitespace-nowrap pb-1 sm:mx-0 sm:px-0 sm:flex-wrap sm:overflow-visible">
           {TABS.filter((t) => counts[t] || t === "review" || t === "all").map((t) => (
             <button
               key={t}
-              onClick={() => setTab(t)}
-              className={`rounded-full px-3 py-1.5 text-sm border ${
+              onClick={() => {
+                setTab(t);
+                setLimit(PAGE);
+              }}
+              className={`shrink-0 rounded-full px-3 py-2 sm:py-1.5 text-sm border ${
                 tab === t ? "bg-[var(--color-neon-green)] text-black border-transparent" : "border-white/15 text-gray-300 hover:bg-white/5"
               }`}
             >
@@ -364,6 +374,14 @@ export default function RefautoAdminPage() {
               );
             })}
             {!shown.length && <p className="text-gray-400 text-sm">해당하는 항목이 없습니다.</p>}
+            {filtered.length > shown.length && (
+              <button
+                onClick={() => setLimit((n) => n + PAGE)}
+                className="sm:col-span-2 lg:col-span-3 rounded-xl border border-white/15 py-3 text-sm text-gray-300"
+              >
+                더 보기 ({shown.length}/{filtered.length})
+              </button>
+            )}
           </div>
         )}
       </main>
@@ -395,6 +413,7 @@ const HINT: Record<Tool, string[]> = {
   ball: ["멈춘 공의 중심", "공의 가장자리"],
 };
 const COLOR: Record<Tool, string> = { kicker: "#ffd400", goal: "#ff3df0", ball: "#35e0ff" };
+const TOOL_KO: Record<Tool, string> = { kicker: "키커", goal: "골대", ball: "멈춘 공" };
 
 function Editor({
   item,
@@ -415,8 +434,9 @@ function Editor({
   const coordW = Number((k.data ?? {}).coord_w) || (rawW ? Math.min(rawW, 1920) : 1920);
   const frames = [{ n: -1, imageId: k.frameImageId ?? "" }, ...(k.candidateFrames ?? [])].filter((f) => f.imageId);
   const [frame, setFrame] = useState(frames[0]?.imageId ?? "");
-  const [tool, setTool] = useState<Tool | null>(null);
+  const [tool, setTool] = useState<Tool>("goal");
   const [pts, setPts] = useState<Partial<Record<Tool, [number, number][]>>>({});
+  const [drag, setDrag] = useState<{ tool: Tool; idx: number } | null>(null);
   const [form, setForm] = useState({
     kicker_cm: String(meta0.kicker_cm ?? ""),
     dummy_cm: String(meta0.dummy_cm ?? "160"),
@@ -425,55 +445,126 @@ function Editor({
     pitch: String(meta0.pitch ?? "adult"),
   });
   const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const loupe = useRef<HTMLCanvasElement>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [imgReady, setImgReady] = useState(0);
+  const [aspect, setAspect] = useState(16 / 9);
   const url = imageUrl(frame);
+  const moving = Number((k.data ?? {}).camera_motion_px) > 4;
+
+  // 모달이 열려 있는 동안 뒤 화면이 같이 스크롤되지 않게
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
 
   useEffect(() => {
-    if (!url || !canvas.current) return;
+    if (!url) return;
     const img = new Image();
     img.onload = () => {
-      const c = canvas.current!;
-      c.width = img.width;
-      c.height = img.height;
-      const x = c.getContext("2d")!;
-      x.drawImage(img, 0, 0);
-      const s = img.width / coordW;
-      x.lineWidth = 3;
-      for (const [t, list] of Object.entries(pts) as [Tool, [number, number][]][]) {
-        x.strokeStyle = x.fillStyle = COLOR[t];
-        list.forEach(([px, py]) => {
-          x.beginPath();
-          x.arc(px * s, py * s, 5, 0, 7);
-          x.fill();
-        });
-        if (list.length > 1) {
-          x.beginPath();
-          list.forEach(([px, py], i) => (i ? x.lineTo(px * s, py * s) : x.moveTo(px * s, py * s)));
-          if (t === "goal" && list.length === 4) x.closePath();
-          x.stroke();
-        }
-      }
+      imgRef.current = img;
+      setAspect(img.width / Math.max(1, img.height));
+      setImgReady((n) => n + 1);
     };
     img.src = url;
-  }, [url, pts, coordW]);
+  }, [url]);
 
-  const click = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!tool) return;
-    const c = e.currentTarget;
-    const r = c.getBoundingClientRect();
-    const s = coordW / c.width;
-    const p: [number, number] = [((e.clientX - r.left) * c.width) / r.width * s, ((e.clientY - r.top) * c.height) / r.height * s];
-    setPts((old) => {
-      const cur = old[tool] ?? [];
-      return cur.length >= NEED[tool] ? old : { ...old, [tool]: [...cur, p] };
-    });
+  // 사진 + 찍은 점 + 돋보기
+  useEffect(() => {
+    const img = imgRef.current;
+    const c = canvas.current;
+    if (!img || !c) return;
+    c.width = img.width;
+    c.height = img.height;
+    const x = c.getContext("2d")!;
+    x.drawImage(img, 0, 0);
+    const s = img.width / coordW;
+    const u = img.width / 640;
+    x.lineWidth = 2 * u;
+    for (const [t, list] of Object.entries(pts) as [Tool, [number, number][]][]) {
+      x.strokeStyle = x.fillStyle = COLOR[t];
+      if (list.length > 1) {
+        x.beginPath();
+        list.forEach(([px, py], i) => (i ? x.lineTo(px * s, py * s) : x.moveTo(px * s, py * s)));
+        if (t === "goal" && list.length === 4) x.closePath();
+        x.stroke();
+      }
+      list.forEach(([px, py], i) => {
+        x.fillStyle = COLOR[t];
+        x.beginPath();
+        x.arc(px * s, py * s, 3.5 * u, 0, 7);
+        x.fill();
+        x.fillStyle = "#000";
+        x.font = `bold ${9 * u}px sans-serif`;
+        x.fillText(String(i + 1), px * s + 4 * u, py * s - 4 * u);
+      });
+    }
+    const L = loupe.current;
+    const lc = L?.getContext("2d");
+    if (L && lc) {
+      lc.clearRect(0, 0, L.width, L.height);
+      const p = drag ? pts[drag.tool]?.[drag.idx] : undefined;
+      if (p) {
+        const zoom = 4;
+        const half = L.width / zoom / 2;
+        lc.imageSmoothingEnabled = false;
+        lc.drawImage(c, p[0] * s - half, p[1] * s - half, half * 2, half * 2, 0, 0, L.width, L.height);
+        lc.strokeStyle = "#39FF14";
+        lc.lineWidth = 1;
+        lc.beginPath();
+        lc.moveTo(L.width / 2, 0);
+        lc.lineTo(L.width / 2, L.height);
+        lc.moveTo(0, L.height / 2);
+        lc.lineTo(L.width, L.height / 2);
+        lc.stroke();
+      }
+    }
+  }, [imgReady, pts, coordW, drag]);
+
+  // 화면 좌표 → 기준 장면 좌표
+  const toCoord = (e: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return [((e.clientX - r.left) / r.width) * coordW, ((e.clientY - r.top) / r.width) * coordW];
   };
 
-  const hint = tool
-    ? (pts[tool]?.length ?? 0) < NEED[tool]
-      ? `${(pts[tool]?.length ?? 0) + 1}/${NEED[tool]}: ${HINT[tool][pts[tool]?.length ?? 0]}`
-      : "완료. 다른 도구를 고르거나 저장하세요."
-    : "도구를 고르고 사진을 클릭하세요.";
+  const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const p = toCoord(e);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const perPx = coordW / e.currentTarget.getBoundingClientRect().width;
+    // 이미 찍은 점 근처를 누르면 그 점을 옮긴다 (손가락 크기 ≈ 22px)
+    let hit: { tool: Tool; idx: number } | null = null;
+    let best = 22 * perPx;
+    for (const [t, list] of Object.entries(pts) as [Tool, [number, number][]][]) {
+      list.forEach((q, i) => {
+        const d = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        if (d < best) {
+          best = d;
+          hit = { tool: t, idx: i };
+        }
+      });
+    }
+    if (!hit) {
+      const cur = pts[tool] ?? [];
+      if (cur.length >= NEED[tool]) return;
+      hit = { tool, idx: cur.length };
+      setPts((old) => ({ ...old, [tool]: [...(old[tool] ?? []), p] }));
+    }
+    setDrag(hit);
+  };
+  const onMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!drag) return;
+    const p = toCoord(e);
+    setPts((old) => ({ ...old, [drag.tool]: (old[drag.tool] ?? []).map((q, i) => (i === drag.idx ? p : q)) }));
+  };
+  const onUp = () => setDrag(null);
+
+  const n = pts[tool]?.length ?? 0;
+  const hint = n < NEED[tool] ? `${n + 1}/${NEED[tool]} · ${HINT[tool][n]} 을 누르세요` : "다 찍었습니다. 점을 끌어 고치거나 저장하세요.";
 
   const save = async () => {
     setErr(null);
@@ -483,6 +574,13 @@ function Editor({
     if (pts.ball?.length === 2) {
       const [a, b] = pts.ball;
       clicks.ball = [a[0], a[1], 2 * Math.hypot(b[0] - a[0], b[1] - a[1])];
+    }
+    for (const t of ["kicker", "goal", "ball"] as Tool[]) {
+      const m = pts[t]?.length ?? 0;
+      if (m > 0 && m < NEED[t]) {
+        setErr(`${TOOL_KO[t]} 점을 ${NEED[t]}개 모두 찍거나 지우세요.`);
+        return;
+      }
     }
     if (clicks.kicker && !form.kicker_cm) {
       setErr("키커 키(cm)를 입력하세요.");
@@ -495,29 +593,57 @@ function Editor({
       goal: form.goal,
       pitch: form.pitch,
     };
+    setSaving(true);
     await onSave(meta, clicks);
+    setSaving(false);
   };
 
-  const moving = Number((k.data ?? {}).camera_motion_px) > 4;
+  const field = "w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2.5 text-base sm:text-sm text-white";
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-2 sm:p-6" role="dialog" aria-modal="true">
-      <div className="bg-[#0d1117] border border-white/10 rounded-2xl w-full max-w-6xl max-h-[95vh] overflow-auto grid lg:grid-cols-[1fr_300px]">
-        <div className="bg-black flex flex-col">
-          {url ? (
-            <canvas ref={canvas} onClick={click} className="w-full h-auto cursor-crosshair" />
-          ) : (
-            <div className="aspect-video flex items-center justify-center">
-              <Loader2 className="animate-spin text-gray-600" />
-            </div>
-          )}
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-stretch sm:items-center justify-center sm:p-6" role="dialog" aria-modal="true">
+      <div className="bg-[#0d1117] sm:border border-white/10 sm:rounded-2xl w-full max-w-6xl h-full sm:h-auto sm:max-h-[95vh] overflow-y-auto overscroll-contain lg:grid lg:grid-cols-[1fr_320px]">
+        {/* 사진: 휴대폰에서는 위에 붙어 있어 아래 입력을 하면서도 보인다 */}
+        <div className="sticky top-0 z-10 bg-black lg:static">
+          <div className="flex items-center justify-between gap-2 px-3 py-2 text-sm lg:hidden">
+            <span className="font-semibold truncate">
+              {item.video.file} · 킥{k.kick}
+            </span>
+            <button onClick={onClose} aria-label="닫기" className="shrink-0 rounded-lg border border-white/15 p-2">
+              <X size={16} />
+            </button>
+          </div>
+          {/* 세로·정사각 영상도 화면 절반을 넘지 않게: 가로폭을 높이 한도에 맞춰 줄인다 (비율 유지 → 클릭 좌표가 정확) */}
+          <div className="relative mx-auto" style={{ width: `min(100%, calc(48vh * ${aspect.toFixed(4)}))` }}>
+            {url ? (
+              <canvas
+                ref={canvas}
+                onPointerDown={onDown}
+                onPointerMove={onMove}
+                onPointerUp={onUp}
+                onPointerCancel={onUp}
+                className="block w-full h-auto touch-none cursor-crosshair"
+              />
+            ) : (
+              <div className="aspect-video flex items-center justify-center">
+                <Loader2 className="animate-spin text-gray-600" />
+              </div>
+            )}
+            <canvas
+              ref={loupe}
+              width={160}
+              height={160}
+              className={`pointer-events-none absolute top-2 left-2 w-28 h-28 rounded-lg border border-white/40 bg-black ${drag ? "" : "hidden"}`}
+            />
+          </div>
+          <div className="px-3 py-2 text-xs sm:text-sm text-gray-200 bg-white/5">{hint}</div>
           {frames.length > 1 && !moving && (
-            <div className="flex gap-2 overflow-x-auto p-2">
+            <div className="flex gap-2 overflow-x-auto px-3 py-2">
               {frames.map((f) => (
                 <button
                   key={f.imageId}
                   onClick={() => setFrame(f.imageId)}
-                  className={`shrink-0 rounded border px-2 py-1 text-xs ${f.imageId === frame ? "border-[var(--color-neon-green)] text-[var(--color-neon-green)]" : "border-white/15 text-gray-400"}`}
+                  className={`shrink-0 rounded border px-3 py-1.5 text-xs ${f.imageId === frame ? "border-[var(--color-neon-green)] text-[var(--color-neon-green)]" : "border-white/15 text-gray-400"}`}
                 >
                   {f.n < 0 ? "기준 장면" : `${f.n}번 프레임`}
                 </button>
@@ -525,70 +651,96 @@ function Editor({
             </div>
           )}
         </div>
+
         <div className="p-4 flex flex-col gap-3 text-sm">
-          <div className="font-semibold break-all">
+          <div className="hidden lg:block font-semibold break-all">
             {item.video.file} · 킥{k.kick}
           </div>
-          {(["kicker", "goal", "ball"] as Tool[]).map((t) => (
-            <button
-              key={t}
-              onClick={() => {
-                setTool(t);
-                setPts((o) => ({ ...o, [t]: [] }));
-                if (t !== "kicker") setFrame(frames[0]?.imageId ?? "");
-              }}
-              className={`text-left rounded-lg border px-3 py-2 ${tool === t ? "border-[var(--color-neon-green)]" : "border-white/15"}`}
-            >
-              {t === "kicker" ? "키커: 발 → 머리 (2번)" : t === "goal" ? "골대: 왼아래 → 오른아래 → 오른위 → 왼위 (4번)" : "멈춘 공: 중심 → 가장자리 (2번)"}
-            </button>
-          ))}
-          <div className="rounded-lg bg-white/5 px-3 py-2 text-gray-300">{hint}</div>
-          {!moving && frames.length > 1 && <p className="text-xs text-gray-400">키커는 아래 장면 중 곧게 선 장면에서 찍으세요. 골대·공은 기준 장면에서.</p>}
-          {(
-            [
-              ["kicker_cm", "키커 키 (cm)"],
-              ["dummy_cm", "더미 높이 (cm, 받침 포함)"],
-            ] as const
-          ).map(([key, label]) => (
-            <label key={key} className="flex flex-col gap-1 text-gray-400">
-              {label}
-              <input
-                type="number"
-                value={form[key]}
-                onChange={(e) => setForm({ ...form, [key]: e.target.value })}
-                className="rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-white"
-              />
-            </label>
-          ))}
-          <label className="flex flex-col gap-1 text-gray-400">
-            골대
-            <select value={form.goal} onChange={(e) => setForm({ ...form, goal: e.target.value })} className="rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-white">
-              <option value="adult">성인 7.32×2.44</option>
-              <option value="youth">유소년 5×2</option>
-              <option value="futsal">풋살 3×2</option>
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-gray-400">
-            공
-            <select value={form.ball} onChange={(e) => setForm({ ...form, ball: e.target.value })} className="rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-white">
-              <option value="5">5호</option>
-              <option value="4">4호</option>
-              <option value="3">3호</option>
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-gray-400">
-            경기장 선
-            <select value={form.pitch} onChange={(e) => setForm({ ...form, pitch: e.target.value })} className="rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-white">
-              <option value="adult">성인 규격 선 사용</option>
-              <option value="none">사용 안 함</option>
-            </select>
-          </label>
-          {err && <div className="text-red-300">{err}</div>}
+          <div className="grid grid-cols-3 gap-2">
+            {(["goal", "ball", "kicker"] as Tool[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => {
+                  setTool(t);
+                  if (t !== "kicker") setFrame(frames[0]?.imageId ?? "");
+                }}
+                className={`rounded-lg border px-2 py-2.5 text-center ${tool === t ? "border-[var(--color-neon-green)] text-white" : "border-white/15 text-gray-300"}`}
+              >
+                <span className="block font-semibold" style={{ color: COLOR[t] }}>
+                  {TOOL_KO[t]}
+                </span>
+                <span className="block text-[11px] text-gray-400">
+                  {pts[t]?.length ?? 0}/{NEED[t]}점
+                </span>
+              </button>
+            ))}
+          </div>
           <div className="flex gap-2">
-            <button onClick={() => void save()} className="rounded-lg bg-[var(--color-neon-green)] text-black px-4 py-2 font-semibold">
-              저장 (Mac 에서 다시 계산)
+            <button
+              onClick={() => setPts((o) => ({ ...o, [tool]: (o[tool] ?? []).slice(0, -1) }))}
+              disabled={!n}
+              className="flex-1 rounded-lg border border-white/15 px-3 py-2 disabled:opacity-40"
+            >
+              마지막 점 지우기
             </button>
-            <button onClick={onClose} className="rounded-lg border border-white/15 px-4 py-2">
+            <button onClick={() => setPts((o) => ({ ...o, [tool]: [] }))} disabled={!n} className="flex-1 rounded-lg border border-white/15 px-3 py-2 disabled:opacity-40">
+              {TOOL_KO[tool]} 다시
+            </button>
+          </div>
+          <p className="text-xs text-gray-400">
+            {tool === "goal"
+              ? "골대: 왼아래 → 오른아래 → 오른위 → 왼위 (파이프 중심). 가려진 모서리는 보이는 기둥을 따라 짐작해 찍으세요."
+              : tool === "ball"
+                ? "멈춘 공: 중심 → 가장자리. 대충 누른 뒤 끌면 돋보기로 맞출 수 있습니다."
+                : "키커: 곧게 선 장면에서 발바닥 → 머리 꼭대기. 아래에 키를 입력하세요."}
+            {!moving && frames.length > 1 && tool === "kicker" ? " 사진 아래에서 장면을 고를 수 있습니다." : ""}
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            {(
+              [
+                ["kicker_cm", "키커 키 (cm)"],
+                ["dummy_cm", "더미 높이 (cm)"],
+              ] as const
+            ).map(([key, label]) => (
+              <label key={key} className="flex flex-col gap-1 text-gray-400">
+                {label}
+                <input type="number" inputMode="numeric" value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} className={field} />
+              </label>
+            ))}
+            <label className="flex flex-col gap-1 text-gray-400">
+              골대
+              <select value={form.goal} onChange={(e) => setForm({ ...form, goal: e.target.value })} className={field}>
+                <option value="adult">성인 7.32×2.44</option>
+                <option value="youth">유소년 5×2</option>
+                <option value="futsal">풋살 3×2</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-gray-400">
+              공
+              <select value={form.ball} onChange={(e) => setForm({ ...form, ball: e.target.value })} className={field}>
+                <option value="5">5호</option>
+                <option value="4">4호</option>
+                <option value="3">3호</option>
+              </select>
+            </label>
+            <label className="col-span-2 flex flex-col gap-1 text-gray-400">
+              경기장 선
+              <select value={form.pitch} onChange={(e) => setForm({ ...form, pitch: e.target.value })} className={field}>
+                <option value="adult">성인 규격 선 사용</option>
+                <option value="none">사용 안 함</option>
+              </select>
+            </label>
+          </div>
+          {err && <div className="text-red-300">{err}</div>}
+          <div className="sticky bottom-0 -mx-4 -mb-4 mt-1 flex gap-2 border-t border-white/10 bg-[#0d1117] p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            <button
+              onClick={() => void save()}
+              disabled={saving}
+              className="flex-1 rounded-lg bg-[var(--color-neon-green)] text-black px-4 py-3 font-semibold disabled:opacity-60"
+            >
+              {saving ? "저장 중…" : "저장 (Mac 에서 다시 계산)"}
+            </button>
+            <button onClick={onClose} className="rounded-lg border border-white/15 px-4 py-3">
               닫기
             </button>
           </div>

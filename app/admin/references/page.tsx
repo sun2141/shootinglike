@@ -480,7 +480,7 @@ export default function ReferenceBatchPage() {
   }, []);
 
   return (
-    <div className="min-h-screen p-6 sm:p-10">
+    <div className="min-h-screen p-4 sm:p-10">
       <header className="mx-auto mb-8 flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-1">
           <Link href="/analyze" className="flex items-center gap-2 text-sm text-gray-400 hover:text-white">

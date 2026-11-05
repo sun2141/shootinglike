@@ -535,7 +535,7 @@ export default function AnalyzePage() {
   const uncertainty = analysisResult?.speedUncertainty ?? null;
 
   return (
-    <div className="min-h-screen flex flex-col p-8 relative">
+    <div className="min-h-screen flex flex-col px-4 py-6 sm:p-8 relative">
       <header className="w-full max-w-4xl mx-auto flex flex-col gap-4 mb-12 sm:flex-row sm:items-center sm:justify-between">
         <Link href="/" className="text-gray-400 hover:text-white flex items-center gap-2 transition-colors">
           <ArrowLeft size={20} />
