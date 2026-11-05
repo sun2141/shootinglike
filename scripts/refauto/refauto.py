@@ -24,7 +24,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-VIDEO_EXT = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
 
 
 def fingerprint(p):
@@ -99,18 +98,16 @@ def write_csv(out, led):
 
 
 def run(folder, redo=False, only=None):
-    """처리한 영상 이름 목록을 돌려준다."""
+    """처리한 영상 이름 목록을 돌려준다. 끝나면 영상을 판정별 폴더로 정리한다."""
     import pipeline
+    import library as lib
     out = folder / "_refauto"
     out.mkdir(exist_ok=True)
     led = load_ledger(out)
-    vids = sorted(p for p in folder.iterdir()
-                  if p.suffix.lower() in VIDEO_EXT and not p.name.startswith("._") and p.is_file())
+    vids = list(lib.iter_videos(folder))
     if only:
-        import unicodedata
-        nf = lambda x: unicodedata.normalize("NFC", x)       # macOS 는 한글 파일명을 자모 분리(NFD)로 저장한다
-        want = {nf(o) for o in only}
-        vids = [p for p in vids if nf(p.name) in want or nf(p.stem) in want]
+        want = {lib.nfc(o) for o in only}
+        vids = [p for p in vids if lib.nfc(p.name) in want or lib.nfc(p.stem) in want]
     # 사람이 찍어 둔 기준(키커 등)이 있는 영상을 먼저: 그 카메라를 같은 삼각대의 다른 영상이 재사용한다
     def has_clicks(p):
         m = p.with_suffix(".json")
@@ -124,21 +121,31 @@ def run(folder, redo=False, only=None):
     for p in fresh:
         print(f"- {p.name}: 복사 중일 수 있어 다음 실행으로 미룸")
     vids = [p for p in vids if p not in fresh]
-    seen, done = {}, []
+    seen, done, dups = {}, [], []
+    known = {fp: lib.path_of(folder, v) for fp, v in led["videos"].items()}
     for p in vids:
+        if lib.paused():
+            print("일시정지 요청 — 여기서 멈춥니다 (USB 안전 분리)")
+            break
         fp = fingerprint(p)
         if fp in seen:
             print(f"- {p.name}: {seen[fp]} 과 같은 영상 — 건너뜀")
+            dups.append(p)
+            continue
+        old = led["videos"].get(fp)
+        if old and known.get(fp) not in (None, p) and known[fp].exists():
+            print(f"- {p.name}: 이미 처리한 {old.get('file')} 과 같은 영상 — 건너뜀")
+            dups.append(p)
             continue
         seen[fp] = p.name
         meta_p = p.with_suffix(".json")
         meta_m = meta_p.stat().st_mtime if meta_p.exists() else 0
-        old = led["videos"].get(fp)
         if old and not redo and old.get("meta_mtime", 0) >= meta_m and old.get("pipeline") == pipeline.VERSION:
             if old.get("file") != p.name:
                 print(f"- {p.name}: 이미 처리한 {old.get('file')} 과 같은 영상 — 건너뜀")
+            old["path"] = lib.rel(folder, p)
             continue
-        print(f"▶ {p.name}")
+        print(f"▶ {lib.rel(folder, p)}")
         try:
             r = pipeline.process(p, out / "overlays", log=print)
         except Exception as e:
@@ -150,12 +157,15 @@ def run(folder, redo=False, only=None):
             for k in r.get("kicks", []):
                 if k.get("kick") in up:
                     k["uploaded_id"] = up[k["kick"]]
-        r.update(fingerprint=fp, meta_mtime=meta_m, pipeline=pipeline.VERSION,
+            if old.get("synced"):
+                r["synced"] = old["synced"]
+        r.update(fingerprint=fp, meta_mtime=meta_m, pipeline=pipeline.VERSION, path=lib.rel(folder, p),
                  processed_at=dt.datetime.now().isoformat(timespec="seconds"))
         led["videos"][fp] = r
         save_ledger(out, led)
         print(f"  → {status_ko(r)}")
         done.append(p.name)
+    lib.organize(folder, led, dups, should_stop=lib.paused)
     save_ledger(out, led)
     summary(led)
     return done
@@ -203,7 +213,8 @@ def main():
     ap.add_argument("--cloud", action="store_true",
                     help="관리자 화면과 동기화: 수정 요청 반영 → 새 영상 처리 → 결과 올리기 (자동 실행용)")
     a = ap.parse_args()
-    folder = Path(a.folder).expanduser().resolve()
+    import library
+    folder = library.resolve(Path(a.folder).expanduser())
     if a.cloud:
         import cloud
         cloud.cycle(folder, a.api)

@@ -17,6 +17,7 @@
     "db:records": "node scripts/reset-leaderboard.mjs",
     "db:reset": "node scripts/reset-leaderboard.mjs",
     "ref:auto": "python3 scripts/refauto/refauto.py",
+    "ref:eject": "bash scripts/refauto/usb_eject.sh",
     "rv:check": "npx --yes tsx scripts/rearview-app/check.mts"
   },
   "dependencies": {

@@ -24,6 +24,29 @@ npm run ref:auto -- /Volumes/64B/freekick --all        # 전부 다시 계산
 ```
 같은 영상이 이름만 바뀌어 들어와도(예: 05·10) 한 번만 처리한다.
 
+## 영상 폴더 정리 (자동)
+새 영상은 영상 폴더 **맨 위**에 넣는다. 분석이 끝나면 워커가 판정에 맞는 하위 폴더로 옮긴다 (옆의 같은 이름 `.json` 도 함께).
+판정이 바뀌면(관리자 화면에서 확정·제외·수정) 다음 실행 때 다시 옮긴다. 폴더 안 `_안내.txt` 에 같은 설명이 있다.
+```
+<영상 폴더>/          ← 새 영상 넣는 곳
+  1_확정/ 2_추정/ 3_확인필요/ 4_측정불가/ 5_프리킥아님/ 6_제외/ 7_오류/ 8_중복/
+  _refauto/           ← 결과 (지우거나 옮기지 말 것)
+```
+- 킥이 여럿이면 가장 좋은 판정으로 분류. 이름만 다른 같은 영상은 `8_중복/`
+- 원장은 영상마다 폴더 안 경로(`path`)를 기억한다. 손으로 다른 하위 폴더로 옮겨도 이름으로 다시 찾는다
+- 옮기기는 같은 USB 안의 이름 바꾸기라 도중에 USB 가 빠져도 파일이 깨지지 않는다
+
+## USB 안전하게 빼기
+`scripts/refauto/USB 안전하게 빼기.command` 를 Finder 에서 두 번 클릭 (`install_launchd.sh` 가 바탕화면에 바로가기를 만든다)
+또는 `npm run ref:eject`.
+1. 분석 워커에 일시정지를 건다 (`~/.refauto/pause`) — 지금 영상까지만 마치고 멈추며, 올리기도 미룬다
+2. USB 를 읽는 분석이 끝날 때까지 기다린 뒤 `diskutil eject`
+3. 꺼낸 뒤 일시정지를 푼다 → USB 를 다시 꽂으면 워커가 알아서 이어 간다
+- USB 이름이 바뀌어 붙어도(예: `64B 1`) `/Volumes/*/freekick/_refauto/ledger.json` 으로 같은 폴더를 찾는다
+- 실행 중에 USB 가 그냥 빠져 잠금(`_refauto/.cloud.lock`)이 남아도, 그 프로세스가 없으면 바로 넘겨받는다
+- 매 실행 끝에 작은 파일(원장·장면·수정 `.json`)을 Mac 의 `~/.refauto/backup/<폴더 이름>/` 에 복사해 둔다 (USB 분실 대비)
+- 수정 요청 반영 중에 멈추면 요청은 '대기'로 남아 다음 실행에서 다시 반영된다
+
 ## 결과 (`<폴더>/_refauto/`)
 | 파일 | 내용 |
 |---|---|
@@ -73,7 +96,7 @@ bash scripts/refauto/install_launchd.sh --uninstall                   # 끄기
   → 'Mac 반영 대기' → 다음 실행 때 재계산), A·수동 확정은 '정답표 등록'(ReferenceVideo, isActive=false)
 - Mac 이 꺼져 있어도 보기·확정·제외·수정 요청은 된다. 재계산만 Mac 이 켜질 때
 - DB: RefautoVideo / RefautoKick / RefautoImage(BYTEA) / RefautoEdit / RefautoState (마이그레이션 20260928000000_add_refauto)
-- 겹쳐 실행 방지: `_refauto/.cloud.lock` (3시간 지나면 자동 해제)
+- 겹쳐 실행 방지: `_refauto/.cloud.lock` (잡고 있던 프로세스가 없으면 바로 해제)
 
 ## DB 업로드
 `/api/admin/references` 에 `isActive=false` 로 올린다 — 앱 측정값이 아직 없어서 보정 계수 계산에는 섞이지 않고 목록에만 보인다.
@@ -83,7 +106,7 @@ bash scripts/refauto/install_launchd.sh --uninstall                   # 끄기
 ## 구성
 `refauto.py`(명령·원장) · `pipeline.py`(영상 1개 처리·판정) · `scan.py`(킥 찾기) · `detect.py`(멈춘 공·골대·더미·흰 선) ·
 `calib.py`(카메라 보정) · `track.py`(원본 해상도 공 추적·흔들림 보정) · `physics.py`(중력+항력+회전 궤적 맞춤) ·
-`review.py`(확인 페이지) · `upload.py`(DB 업로드) · `manual_refs.json`(수동 분석 레퍼런스)
+`review.py`(확인 페이지) · `upload.py`(DB 업로드) · `library.py`(폴더 정리·USB 안전 분리·백업) · `usb_eject.sh` · `manual_refs.json`(수동 분석 레퍼런스)
 
 ## 검증 (2026-09-27, 11개 영상)
 | 영상 | 자동 | 수동 분석 | 차이 |

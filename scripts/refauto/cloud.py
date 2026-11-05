@@ -22,6 +22,7 @@ from pathlib import Path
 
 import cv2
 
+import library as lib
 from refauto import load_ledger, run, save_ledger
 from review import sidecar_update
 from upload import token
@@ -40,24 +41,6 @@ class Api:
                                      headers={"Content-Type": "application/json", "x-admin-token": self.tok})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
-
-
-# ------------------------------------------------------------ 잠금 (겹쳐 실행 방지)
-class Lock:
-    def __init__(self, path):
-        self.path = path
-
-    def __enter__(self):
-        if self.path.exists() and time.time() - self.path.stat().st_mtime < 3 * 3600:
-            raise SystemExit(f"다른 실행이 진행 중입니다 ({self.path}). 3시간이 지나면 자동으로 풀립니다.")
-        self.path.write_text(str(os.getpid()))
-        return self
-
-    def __exit__(self, *a):
-        try:
-            self.path.unlink()
-        except OSError:
-            self.path.write_text("")          # 지우기 권한이 없으면 비워 두고 시각으로 판단
 
 
 # ------------------------------------------------------------ 이미지
@@ -163,8 +146,11 @@ def digest(v):
 
 # ------------------------------------------------------------ 한 번 돌기
 def cycle(folder, base):
+    if lib.paused():
+        print(f"일시정지 중입니다 ({lib.PAUSE}). USB 안전 분리가 끝나면 풀립니다.")
+        return
     if not folder.exists():
-        print(f"{folder} 가 없습니다 (외장 디스크가 빠졌나요?). 다음 실행에 다시 봅니다.")
+        print(f"{folder} 가 없습니다 (USB 가 빠졌나요?). 다음 실행에 다시 봅니다.")
         return
     tok = token()
     if not tok:
@@ -172,10 +158,9 @@ def cycle(folder, base):
     api = Api(base, tok)
     out = folder / "_refauto"
     out.mkdir(exist_ok=True)
-    with Lock(out / ".cloud.lock"):
+    with lib.Lock(out / ".cloud.lock"):
         started = time.time()
         led = load_ledger(out)
-        by_id = {fp: v["file"] for fp, v in led["videos"].items()}
 
         # 1) 수정 요청
         try:
@@ -185,11 +170,12 @@ def cycle(folder, base):
             edits, api = [], None
         redo, handled, failed = set(), [], []
         for e in edits:
-            name = by_id.get(e["videoId"])
-            if not name or not (folder / name).exists():
+            v_ = led["videos"].get(e["videoId"])
+            video = lib.path_of(folder, v_) if v_ else None
+            if video is None:
                 failed.append(e["id"])
                 continue
-            video = folder / name
+            name = video.name
             if e["action"] == "recompute":
                 sidecar_update(video, e["kick"], e.get("meta") or {}, e.get("clicks"))
                 redo.add(name)
@@ -204,6 +190,9 @@ def cycle(folder, base):
             handled.append(e["id"])
         if handled:
             save_ledger(out, led)
+            # 확정·제외만 바뀐 영상도 판정 폴더를 옮긴다
+            lib.organize(folder, led)
+            save_ledger(out, led)
         if redo:
             print(f"수정 요청 반영해 다시 계산: {', '.join(sorted(redo))}")
             run(folder, redo=True, only=sorted(redo))
@@ -211,7 +200,12 @@ def cycle(folder, base):
         # 2) 새 영상
         run(folder)
 
+        lib.backup(folder, out / "ledger.json")
         if api is None:
+            return
+        if lib.paused():
+            # 수정 요청은 완료로 표시하지 않는다 — 다음 실행에서 다시 반영·계산된다 (같은 값이라 여러 번 반영해도 같다)
+            print("일시정지 요청 — 올리기는 다음 실행으로 미룹니다 (USB 안전 분리)")
             return
         # 3) 바뀐 것만 올리기
         led = load_ledger(out)

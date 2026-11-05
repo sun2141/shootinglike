@@ -12,6 +12,7 @@ LOG="$HOME/Library/Logs/refauto.log"
 if [[ "${1:-}" == "--uninstall" ]]; then
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
+  [[ -L "$HOME/Desktop/USB 안전하게 빼기.command" ]] && rm -f "$HOME/Desktop/USB 안전하게 빼기.command"
   echo "자동 실행을 껐습니다."
   exit 0
 fi
@@ -62,5 +63,12 @@ EOF
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "설치했습니다. 기록: $LOG"
+
+# USB 안전하게 빼기 바로가기를 바탕화면에 (두 번 클릭하면 분석을 멈추고 USB 를 꺼낸다)
+EJ="$REPO/scripts/refauto/USB 안전하게 빼기.command"
+chmod +x "$EJ" "$REPO/scripts/refauto/usb_eject.sh" 2>/dev/null || true
+if [[ -d "$HOME/Desktop" && ! -e "$HOME/Desktop/USB 안전하게 빼기.command" ]]; then
+  ln -s "$EJ" "$HOME/Desktop/USB 안전하게 빼기.command" 2>/dev/null && echo "바탕화면에 'USB 안전하게 빼기' 바로가기를 만들었습니다."
+fi
 echo "처음 한 번 macOS 가 '$PY 가 외장 볼륨에 접근' 허용을 물으면 허용하세요."
 echo "(안 물었는데 로그에 Operation not permitted 가 보이면: 시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근 권한에 python3 추가)"

@@ -72,7 +72,8 @@ def make_handler(folder):
                 from urllib.parse import parse_qs
                 import cv2
                 q = parse_qs(u.query)
-                v = folder / q["file"][0]
+                import library
+                v = library.find(folder, q["file"][0]) or folder / q["file"][0]
                 n = int(q["n"][0])
                 cap = cv2.VideoCapture(str(v))
                 cap.set(cv2.CAP_PROP_POS_FRAMES, n)
@@ -95,8 +96,9 @@ def make_handler(folder):
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
             fname, kick, act = body.get("file"), body.get("kick"), body.get("action")
-            video = folder / fname
-            if not video.exists():
+            import library
+            video = library.find(folder, fname or "")
+            if video is None:
                 return self._send(400, json.dumps({"error": "영상을 찾을 수 없습니다"}))
             if act in ("accept", "reject"):
                 led = load_ledger(out)
