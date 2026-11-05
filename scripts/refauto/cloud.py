@@ -82,6 +82,17 @@ def push_images(api, imgs):
 
 
 # ------------------------------------------------------------ 결과 → 올릴 모양
+def expected_cv():
+    """requirements.txt 에 고정한 OpenCV 판 (예: 5.0.0.93 → '5.0.0')."""
+    try:
+        for line in (Path(__file__).parent / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            if line.startswith("opencv-python-headless=="):
+                return ".".join(line.split("==")[1].strip().split(".")[:3])
+    except OSError:
+        pass
+    return None
+
+
 def default_coord_w(info):
     """예전 원장처럼 킥에 coord_w 가 없을 때: pipeline 의 Reader 와 같은 규칙(가로 1920 이하로 축소)."""
     info = info or {}
@@ -230,13 +241,17 @@ def cycle(folder, base):
         if failed:
             api.call("PATCH", "/api/admin/refauto/edits",
                      {"ids": failed, "status": "failed", "result": "영상 파일을 찾지 못함"})
+        cv_want = expected_cv()
+        if cv_want and cv_want != cv2.__version__:
+            print(f"주의: OpenCV {cv2.__version__} — 검증한 판은 {cv_want}. install_launchd.sh 를 다시 실행해 맞추세요.")
         summary = {}
         for v in led["videos"].values():
             for k in v.get("kicks", []):
                 summary[k.get("status")] = summary.get(k.get("status"), 0) + 1
         api.call("POST", "/api/admin/refauto/sync", {"videos": [], "state": {
             "worker": {"at": datetime.now(timezone.utc).isoformat(), "host": socket.gethostname(),
-                       "folder": str(folder), "summary": summary, "seconds": round(time.time() - started)},
+                       "folder": str(folder), "summary": summary, "seconds": round(time.time() - started),
+                       "cv": cv2.__version__, "cv_expected": cv_want},
             "manual_refs": led.get("manual_refs", []),
         }})
         print(f"동기화: 영상 {n}개 올림 · 수정 요청 {len(handled)}건 처리")

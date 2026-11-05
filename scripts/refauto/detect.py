@@ -140,7 +140,9 @@ def _goal(img, relaxed):
     H, W = img.shape[:2]
     wm = _white(img)
     th = max(3, int(round(W / 640)))
-    vert = cv2.morphologyEx(wm, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (th, max(20, H // 30))))
+    # 넓힌 검색에서는 더미 위로 조금만 보이는 기둥 조각도 후보로 남긴다 (영상 디코더에 따라 몇 px 씩 달라진다)
+    vmin = max(12, H // 60) if relaxed else max(20, H // 30)
+    vert = cv2.morphologyEx(wm, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (th, vmin)))
     nv, lv, sv, _ = cv2.connectedComponentsWithStats(vert)
     edge = field_edge(img)
 
@@ -160,7 +162,7 @@ def _goal(img, relaxed):
                 break
         else:
             merged.append(list(p))
-    posts = [np.array(p) for p in merged if p[3] > H / 25 and p[2] < p[3] / 5]
+    posts = [np.array(p) for p in merged if p[3] > (H / 60 if relaxed else H / 25) and p[2] < max(p[3] / 5, th + 3 if relaxed else 0)]
     if relaxed:
         # 화면 아래쪽이 사람에 가리면 field_edge 가 틀리므로, 기둥 바로 아래가 잔디인지 직접 본다
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -178,7 +180,7 @@ def _goal(img, relaxed):
             win = grass[int(b + 2):int(b + 2 + max(6, 0.15 * h)), int(max(0, cx - 2 * w - 3)):int(cx + 2 * w + 4)]
             return float(win.mean()) if win.size else 0.0
         grassy = {tuple(p) for p in posts if grass_below(p) > 0.6}
-        occluded = {tuple(p) for p in posts if grass_below(p) < 0.2}
+        occluded = {tuple(p) for p in posts if grass_below(p) < 0.5}
     else:
         grassy = {tuple(p) for p in posts if on_grass(p)}
         posts = [p for p in posts if tuple(p) in grassy]
@@ -197,15 +199,21 @@ def _goal(img, relaxed):
             frac = hit.mean() if len(hit) else 0
             if frac < (0.75 if relaxed else 0.6) or not (tuple(l) in grassy or tuple(r) in grassy):
                 continue
+            if relaxed and (min(l[1], r[1]) < 0.03 * H or l[0] < 0.02 * W or r[0] + r[2] > 0.98 * W):
+                continue                          # 화면 가장자리에 붙은 세로선(건물·하늘 경계)은 골대가 아니다
             if relaxed and not (tuple(l) in grassy and tuple(r) in grassy):
                 # 가려진 쪽 기둥: 잔디까지 내려오지 않지만 꼭대기가 다른 기둥과 맞고 더 짧아야 한다
                 short, tall = (l, r) if tuple(r) in grassy else (r, l)
-                if tuple(short) not in occluded or short[3] > tall[3] or abs(short[1] - tall[1]) > 0.15 * tall[3]:
+                if not H / 25 < tall[3] < 0.6 * H or tuple(short) not in occluded or short[3] > tall[3] or abs(short[1] - tall[1]) > 0.15 * tall[3]:
                     continue
                 # 울타리와 구별: 골대 기둥은 크로스바 위로 이어지지 않고, 크로스바도 기둥 밖으로 길게 이어지지 않는다
-                above = [wm[max(0, int(p[1] - 0.4 * hmax)):max(0, int(p[1] - 4)), max(0, int(p[0] - 2)):int(p[0] + p[2] + 2)].any(1).mean()
-                         if p[1] > 8 else 0 for p in (l, r)]
-                if max(above) > 0.5:
+                def run_above(p):
+                    # 기둥 꼭대기 바로 위로 끊김 없이 이어지는 흰 세로선의 길이 (울타리 기둥이면 길다, 뒤 건물 창문은 끊긴다)
+                    cx = int(p[0] + p[2] / 2)
+                    col = wm[:max(0, int(p[1] - 2)), max(0, cx - 1):cx + 2].any(1)[::-1]
+                    stop = np.where(~col)[0]
+                    return int(stop[0]) if len(stop) else len(col)
+                if max(run_above(l), run_above(r)) > 0.3 * hmax:
                     continue
                 ext = int(0.25 * sep)
                 out_l = [wm[max(0, y - 5):y + 6, x].any() for x, y in zip(range(max(0, int(l[0]) - ext), max(0, int(l[0]) - 4)), [int(l[1] + th)] * ext)]

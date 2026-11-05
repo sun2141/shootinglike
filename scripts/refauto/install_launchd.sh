@@ -26,7 +26,11 @@ else PY="$(command -v python3)"; fi
 echo "사용할 python: $PY"
 FFDIR="$(dirname "$(command -v ffprobe 2>/dev/null || echo /opt/homebrew/bin/ffprobe)")"
 
-"$PY" -c "import numpy, scipy, cv2" || { echo "numpy/scipy/opencv 를 불러오지 못했습니다. README 의 준비(전용 가상환경) 를 먼저 하세요."; exit 1; }
+# 전용 가상환경이면 패키지 판을 requirements.txt 에 맞춘다 (OpenCV 판이 다르면 검출 결과가 달라진다)
+if [[ "$PY" == "$VENV_PY" ]]; then
+  "$PY" -m pip install -q -r "$REPO/scripts/refauto/requirements.txt" || echo "주의: 패키지 설치에 실패했습니다 (인터넷 확인)."
+fi
+"$PY" -c "import numpy, scipy, cv2; print('OpenCV', cv2.__version__)" || { echo "numpy/scipy/opencv 를 불러오지 못했습니다. README 의 준비(전용 가상환경) 를 먼저 하세요."; exit 1; }
 grep -q "^ADMIN_REFERENCE_TOKEN=" "$REPO/.env.local" 2>/dev/null || echo "주의: $REPO/.env.local 에 ADMIN_REFERENCE_TOKEN 이 없습니다 (동기화가 안 됩니다)."
 
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"

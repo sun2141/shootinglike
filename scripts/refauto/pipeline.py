@@ -12,7 +12,9 @@ import scan
 import track as trk
 from video import Reader, probe
 
-VERSION = "refauto-2"   # 2: 가려진 골대 기둥 검출, 실패한 킥에도 coord_w
+VERSION = "refauto-3"   # 2: 가려진 골대 기둥 검출, 실패한 킥에도 coord_w · 3: 가려진 기둥 조각 기준 완화
+# OpenCV 판(특히 영상 디코더)이 바뀌면 프레임 픽셀이 조금씩 달라져 검출 결과가 바뀐다 → 판이 바뀌면 다시 계산
+VERSION += f"+cv{cv2.__version__}"
 
 DEFAULTS = {"dummy_cm": 160, "goal": "adult", "ball": 5, "pitch": "adult", "kicker_cm": None}
 BALL_M = {5: 0.22, 4: 0.205, 3: 0.19}

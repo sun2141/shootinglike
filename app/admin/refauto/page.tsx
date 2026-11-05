@@ -46,7 +46,7 @@ type ManualRef = { file: string; kick: number; status: string; speed_kmh: number
 type Payload = {
   videos: Video[];
   edits: Edit[];
-  state: { worker?: { at?: string; host?: string; folder?: string; summary?: string }; manual_refs?: ManualRef[] };
+  state: { worker?: { at?: string; host?: string; folder?: string; summary?: string; cv?: string; cv_expected?: string | null }; manual_refs?: ManualRef[] };
 };
 
 const STATUS_KO: Record<string, string> = {
@@ -238,6 +238,12 @@ export default function RefautoAdminPage() {
             {pending.size ? ` · 반영 대기 ${pending.size}건` : ""}
           </span>
         </div>
+        {worker?.cv && worker.cv_expected && worker.cv !== worker.cv_expected && (
+          <div className="rounded-lg border border-yellow-300/30 bg-yellow-300/10 px-3 py-2 text-sm text-yellow-100">
+            Mac 의 OpenCV 판({worker.cv})이 검증한 판({worker.cv_expected})과 달라 검출 결과가 다를 수 있습니다. Mac 에서{" "}
+            <code className="font-mono">bash scripts/refauto/install_launchd.sh /Volumes/64B/freekick</code> 를 한 번 실행하세요.
+          </div>
+        )}
         {message && <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">{message}</div>}
 
         <div className="-mx-4 px-4 flex gap-2 overflow-x-auto whitespace-nowrap pb-1 sm:mx-0 sm:px-0 sm:flex-wrap sm:overflow-visible">

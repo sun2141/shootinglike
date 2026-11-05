@@ -10,6 +10,9 @@
 scripts/refauto/.venv/bin/pip install -U pip
 scripts/refauto/.venv/bin/pip install -r scripts/refauto/requirements.txt
 ```
+**OpenCV 판은 `requirements.txt` 에 고정(5.0.0.93)** — 판마다 영상 디코더가 달라 프레임이 조금씩 다르고, 그 차이로 골대·멈춘 공 검출이 바뀐다
+(4.12 에서는 08·09 가 확정에서 떨어짐). `install_launchd.sh` 가 가상환경 패키지를 이 판에 맞추고, 판이 바뀌면 워커가 전부 다시 계산한다
+(원장의 `pipeline` 값에 OpenCV 판이 들어감). 관리자 화면은 판이 다르면 경고를 띄운다.
 이후 실행은 `scripts/refauto/.venv/bin/python3 scripts/refauto/refauto.py ...`. `install_launchd.sh` 는 이 가상환경이 있으면 자동으로 쓴다
 (다른 python 을 쓰려면 `REFAUTO_PYTHON=/경로/python3`).
 ffmpeg(ffprobe)가 있으면 fps·회전 정보를 더 정확히 읽는다 (없어도 동작).
