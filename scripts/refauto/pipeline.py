@@ -12,7 +12,7 @@ import scan
 import track as trk
 from video import Reader, probe
 
-VERSION = "refauto-1"
+VERSION = "refauto-2"   # 2: 가려진 골대 기둥 검출, 실패한 킥에도 coord_w
 
 DEFAULTS = {"dummy_cm": 160, "goal": "adult", "ball": 5, "pitch": "adult", "kicker_cm": None}
 BALL_M = {5: 0.22, 4: 0.205, 3: 0.19}
@@ -132,6 +132,8 @@ def process(video, out_dir, log=print):
             after = median_frame(rd, i0 + 12, i0 + 30, 5)
         if ref is None or after is None:
             continue
+        # 관리자 화면에서 기준 장면을 클릭할 때 쓰는 좌표 폭 — 실패한 킥에도 있어야 손으로 고칠 수 있다
+        rec["coord_w"] = int(ref.shape[1])
         fr_dir = out_dir.parent / "frames"
         fr_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(fr_dir / f"{video.stem}_k{kn + 1}.jpg"), ref, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -238,7 +240,6 @@ def process(video, out_dir, log=print):
             st, why = "manual", why + ["사람이 확인 페이지에서 확정"]
         rec.update(status=st, reasons=why)
         overlay(ref, cam, rec, out_dir / f"{video.stem}_k{kn + 1}.jpg")
-        rec["coord_w"] = int(ref.shape[1])
         rec["candidates"] = candidate_frames(rd, video, kn + 1, fr_dir, rec["n_frames"]) if moving <= 4 else []
         results.append(rec)
         log(f"  킥{kn + 1}: {fitr['speed_kmh']:.1f} km/h, 거리 {-P0[1]:.1f} m, 판정 {st} {'; '.join(why)}")

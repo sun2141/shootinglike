@@ -37,6 +37,7 @@ type Video = {
   status: string;
   reason: string | null;
   meta: Record<string, unknown> | null;
+  info: { width?: number; height?: number; rotate?: number } | null;
   kicks: Kick[];
 };
 type Edit = { id: string; videoId: string; kick: number; action: string; status: string; result: string | null; createdAt: string };
@@ -408,7 +409,10 @@ function Editor({
 }) {
   const k = item.kick!;
   const meta0 = item.video.meta ?? {};
-  const coordW = Number((k.data ?? {}).coord_w) || 1920;
+  // 기준 장면 좌표 폭: 워커가 올린 coord_w, 없으면 Reader 규칙(가로 1920 이하로 축소)으로 영상 크기에서 계산
+  const info = item.video.info ?? {};
+  const rawW = [90, 270].includes(Number(info.rotate)) ? info.height : info.width;
+  const coordW = Number((k.data ?? {}).coord_w) || (rawW ? Math.min(rawW, 1920) : 1920);
   const frames = [{ n: -1, imageId: k.frameImageId ?? "" }, ...(k.candidateFrames ?? [])].filter((f) => f.imageId);
   const [frame, setFrame] = useState(frames[0]?.imageId ?? "");
   const [tool, setTool] = useState<Tool | null>(null);

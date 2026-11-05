@@ -99,7 +99,18 @@ def push_images(api, imgs):
 
 
 # ------------------------------------------------------------ 결과 → 올릴 모양
-def kick_payload(out, stem, k, imgs):
+def default_coord_w(info):
+    """예전 원장처럼 킥에 coord_w 가 없을 때: pipeline 의 Reader 와 같은 규칙(가로 1920 이하로 축소)."""
+    info = info or {}
+    w, h = info.get("width"), info.get("height")
+    if not w:
+        return None
+    if info.get("rotate") in (90, 270) and h:
+        w = h
+    return int(round(w * min(1.0, 1920 / w)))
+
+
+def kick_payload(out, stem, k, imgs, coord_w=None):
     f = k.get("fit") or {}
     ov = out / "overlays" / f"{stem}_k{k.get('kick')}.jpg"
     fr = out / "frames" / f"{stem}_k{k.get('kick')}.jpg"
@@ -124,7 +135,7 @@ def kick_payload(out, stem, k, imgs):
         "distM": -f["P0"][1] if f.get("P0") else None, "rmsPx": f.get("rms_px"),
         "trackPoints": k.get("track_points"),
         "data": {
-            "coord_w": k.get("coord_w"), "camera_motion_px": k.get("camera_motion_px"),
+            "coord_w": k.get("coord_w") or coord_w, "camera_motion_px": k.get("camera_motion_px"),
             "t_kick": f.get("t_kick"), "t_end": t_end, "ball_px": k.get("ball_px"),
             "goal_cross": f.get("goal_cross"), "goal": k.get("goal"),
             "calib": {x: calib.get(x) for x in ("f", "heights", "line_far_inliers", "line_rms_m", "ball_ratio", "reused_scene")},
@@ -140,7 +151,7 @@ def video_payload(out, fp, v, imgs):
     return {
         "id": fp, "file": v["file"], "status": v.get("status", "unknown"), "reason": v.get("reason"),
         "meta": v.get("meta"), "info": v.get("info"), "processedAt": v.get("processed_at"),
-        "kicks": [kick_payload(out, stem, k, imgs) for k in v.get("kicks", []) if k.get("kick")],
+        "kicks": [kick_payload(out, stem, k, imgs, default_coord_w(v.get("info"))) for k in v.get("kicks", []) if k.get("kick")],
     }
 
 

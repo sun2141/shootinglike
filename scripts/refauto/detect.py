@@ -131,7 +131,12 @@ def field_edge(img, gap=25):
 
 def goal(img):
     """굵은 흰 기둥 2개 + 두 기둥 꼭대기를 잇는 흰 크로스바.
-    반환 dict(corners=[BL,BR,TR,TL], bottom_ok=[왼,오]) 또는 None. 모서리는 파이프 중심."""
+    반환 dict(corners=[BL,BR,TR,TL], bottom_ok=[왼,오]) 또는 None. 모서리는 파이프 중심.
+    먼저 엄격하게 찾고, 못 찾으면 한쪽 기둥이 더미·사람에 가려 짧게만 보이는 경우까지 넓혀 본다."""
+    return _goal(img, False) or _goal(img, True)
+
+
+def _goal(img, relaxed):
     H, W = img.shape[:2]
     wm = _white(img)
     th = max(3, int(round(W / 640)))
@@ -156,8 +161,27 @@ def goal(img):
         else:
             merged.append(list(p))
     posts = [np.array(p) for p in merged if p[3] > H / 25 and p[2] < p[3] / 5]
-    posts = [p for p in posts if on_grass(p)]
-    grassy = {tuple(p) for p in posts}
+    if relaxed:
+        # 화면 아래쪽이 사람에 가리면 field_edge 가 틀리므로, 기둥 바로 아래가 잔디인지 직접 본다
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        g0 = ((hsv[:, :, 0] > 30) & (hsv[:, :, 0] < 95) & (hsv[:, :, 1] > 35)).astype(np.uint8)
+        # 경기장 = 화면 아래쪽에 닿는 큰 잔디 덩어리 (가는 흰 선은 건너 잇고, 나무·산의 초록은 뺀다)
+        nG, labG, stG, _ = cv2.connectedComponentsWithStats(
+            cv2.morphologyEx(g0, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(9, H // 40)))))
+        bottom = set(np.unique(labG[int(0.85 * H):])) - {0}
+        keep = [k for k in bottom if stG[k, 4] > 0.05 * H * W]
+        grass = np.isin(labG, keep) & (g0 > 0)
+
+        def grass_below(p):
+            x, y, w, h = p
+            cx, b = x + w / 2, y + h
+            win = grass[int(b + 2):int(b + 2 + max(6, 0.15 * h)), int(max(0, cx - 2 * w - 3)):int(cx + 2 * w + 4)]
+            return float(win.mean()) if win.size else 0.0
+        grassy = {tuple(p) for p in posts if grass_below(p) > 0.6}
+        occluded = {tuple(p) for p in posts if grass_below(p) < 0.2}
+    else:
+        grassy = {tuple(p) for p in posts if on_grass(p)}
+        posts = [p for p in posts if tuple(p) in grassy]
     best = None
     for l in posts:
         for r in posts:
@@ -171,8 +195,23 @@ def goal(img):
             ys = np.interp(xs, [l[0] + l[2], r[0]], [l[1] + th, r[1] + th]).astype(int)
             hit = np.array([wm[max(0, y - 5):y + 6, x].any() for x, y in zip(xs, ys)])
             frac = hit.mean() if len(hit) else 0
-            if frac < 0.6 or not (tuple(l) in grassy or tuple(r) in grassy):
+            if frac < (0.75 if relaxed else 0.6) or not (tuple(l) in grassy or tuple(r) in grassy):
                 continue
+            if relaxed and not (tuple(l) in grassy and tuple(r) in grassy):
+                # 가려진 쪽 기둥: 잔디까지 내려오지 않지만 꼭대기가 다른 기둥과 맞고 더 짧아야 한다
+                short, tall = (l, r) if tuple(r) in grassy else (r, l)
+                if tuple(short) not in occluded or short[3] > tall[3] or abs(short[1] - tall[1]) > 0.15 * tall[3]:
+                    continue
+                # 울타리와 구별: 골대 기둥은 크로스바 위로 이어지지 않고, 크로스바도 기둥 밖으로 길게 이어지지 않는다
+                above = [wm[max(0, int(p[1] - 0.4 * hmax)):max(0, int(p[1] - 4)), max(0, int(p[0] - 2)):int(p[0] + p[2] + 2)].any(1).mean()
+                         if p[1] > 8 else 0 for p in (l, r)]
+                if max(above) > 0.5:
+                    continue
+                ext = int(0.25 * sep)
+                out_l = [wm[max(0, y - 5):y + 6, x].any() for x, y in zip(range(max(0, int(l[0]) - ext), max(0, int(l[0]) - 4)), [int(l[1] + th)] * ext)]
+                out_r = [wm[max(0, y - 5):y + 6, x].any() for x, y in zip(range(int(r[0] + r[2]) + 4, min(W, int(r[0] + r[2]) + ext)), [int(r[1] + th)] * ext)]
+                if (np.mean(out_l) if out_l else 0) > 0.6 and (np.mean(out_r) if out_r else 0) > 0.6:
+                    continue
             s = frac * sep + l[3] + r[3] - 2 * abs(l[3] - r[3])
             if best is None or s > best[0]:
                 best = (s, l, r)
@@ -227,6 +266,18 @@ def goal(img):
     BR = np.array([np.polyval(cr, rb), rb])
     hl, hr = BL[1] - TL[1], BR[1] - TR[1]
     bottom_ok = [bool(hl > 0.85 * hr), bool(hr > 0.85 * hl)]
+    if relaxed:
+        # 넓힌 검색은 화면 가장자리에 붙은 것(잘린 골대·자막·테두리)은 받지 않는다
+        m = 0.02 * W
+        if min(TL[0], BL[0]) < m or max(TR[0], BR[0]) > W - m or min(TL[1], TR[1]) < 0.03 * H:
+            return None
+        # 가려진 기둥의 아래끝은 보이는 기둥 높이만큼 기둥 선을 따라 내린다 (보정에서는 큰 오차로 다룬다)
+        if not bottom_ok[0]:
+            y = TL[1] + hr
+            BL = np.array([np.polyval(cl, y), y])
+        if not bottom_ok[1]:
+            y = TR[1] + hl
+            BR = np.array([np.polyval(cr, y), y])
     return {"corners": [BL.tolist(), BR.tolist(), TR.tolist(), TL.tolist()], "bottom_ok": bottom_ok}
 
 
