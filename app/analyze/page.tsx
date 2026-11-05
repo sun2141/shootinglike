@@ -33,6 +33,8 @@ import html2canvas from "html2canvas";
 
 const MAX_CLIENT_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
 const OPT_IN_STORAGE_KEY = "freekickDataOptIn";
+/** 영상 원본 업로드(학습 데이터 동의). 서버 비용·한도 때문에 기본은 꺼 둔다 — app/api/dataset/upload 참고 */
+const DATASET_UPLOAD_ENABLED = process.env.NEXT_PUBLIC_DATASET_UPLOAD === "1";
 const PLAYER_HEIGHT_STORAGE_KEY = "freekickPlayerHeightCm";
 const DEFAULT_VIDEO_PREVIEW_ASPECT_RATIO = 16 / 9;
 const MOBILE_VIDEO_EXTENSION_PATTERN = /\.(mp4|m4v|mov|webm|avi|mkv)$/i;
@@ -284,7 +286,7 @@ export default function AnalyzePage() {
           }),
         });
 
-        if (optIn && videoFile) {
+        if (DATASET_UPLOAD_ENABLED && optIn && videoFile) {
           const formData = new FormData();
           formData.append("video", videoFile);
           formData.append("deviceId", deviceId);
@@ -651,6 +653,18 @@ export default function AnalyzePage() {
               </div>
             </div>
 
+            <Link
+              href="/analyze/freekick"
+              className="flex items-center justify-between gap-3 rounded-xl border border-[var(--color-neon-blue)]/40 bg-[var(--color-neon-blue)]/10 p-4 text-sm hover:bg-[var(--color-neon-blue)]/20 transition-colors"
+            >
+              <span>
+                <span className="block font-bold text-white">프리킥을 공 뒤 대각선에서 찍었나요?</span>
+                <span className="block text-xs text-gray-400 mt-1">골대가 보이는 뒤쪽 구도는 프리킥 측정(베타)에서 잽니다</span>
+              </span>
+              <span className="shrink-0 font-bold text-[var(--color-neon-blue)]">프리킥 측정 →</span>
+            </Link>
+
+            {DATASET_UPLOAD_ENABLED && (
             <label className="flex items-start gap-3 p-4 bg-white/5 border border-white/10 rounded-xl cursor-pointer hover:bg-white/10 transition-colors">
               <input
                 type="checkbox"
@@ -665,6 +679,7 @@ export default function AnalyzePage() {
                 </span>
               </div>
             </label>
+            )}
           </div>
         ) : (
           <div className="w-full flex flex-col items-center gap-8">

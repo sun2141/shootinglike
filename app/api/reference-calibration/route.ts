@@ -20,9 +20,11 @@ export async function GET() {
       orderBy: { createdAt: "desc" },
     });
 
-    return NextResponse.json({
-      calibration: buildReferenceCalibrationSummary(references),
-    });
+    return NextResponse.json(
+      { calibration: buildReferenceCalibrationSummary(references) },
+      // 분석할 때마다 부르는 요청이라 CDN 에 5분 캐시 — 사용자가 늘어도 DB 조회는 5분에 한 번
+      { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=3600" } },
+    );
   } catch (error) {
     console.error("Failed to load reference calibration:", error);
     return NextResponse.json({

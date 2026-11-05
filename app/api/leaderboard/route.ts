@@ -21,7 +21,10 @@ export async function GET() {
       }
     });
 
-    return NextResponse.json(topAnalyses);
+    // 공개 조회 API — CDN 에 1분 캐시해 반복 호출이 DB 로 가지 않게
+    return NextResponse.json(topAnalyses, {
+      headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=600' },
+    });
   } catch (error) {
     console.error('Failed to fetch leaderboard:', error);
     return NextResponse.json({ error: 'Failed to fetch leaderboard' }, { status: 500 });

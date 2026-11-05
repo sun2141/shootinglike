@@ -16,7 +16,8 @@
     "truth:apply": "node scripts/apply_truth.mjs",
     "db:records": "node scripts/reset-leaderboard.mjs",
     "db:reset": "node scripts/reset-leaderboard.mjs",
-    "ref:auto": "python3 scripts/refauto/refauto.py"
+    "ref:auto": "python3 scripts/refauto/refauto.py",
+    "rv:check": "npx --yes tsx scripts/rearview-app/check.mts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.35",

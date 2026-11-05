@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-10-01 · Claude — 앱 프리킥 측정(대각선 뒤) `/analyze/freekick` + 서버 비용 정리
+
+**원칙: 분석은 전부 사용자 기기(브라우저)에서.** 영상은 서버로 가지 않고, 사용자 수가 늘어도 서버 연산·트래픽이 늘지 않는다.
+- `lib/rearview/` (브라우저·Node 공용, 외부 의존성 없음): refauto 파이썬 파이프라인의 앱용 이식
+  - `calibrate.ts` 골대 4점 + 멈춘 공 크기 + 폰 화각 사전값(f ≈ 0.74×긴 변 ± 0.08) → 카메라, 초점거리 1σ 범위
+  - `track.ts` 멈춘 공 원 맞춤, 킥 순간(공 자리 변화), 7프레임 버퍼 추적(사슬로 첫 포착 → 예측 추적), 튀는 점 제거
+  - `physics.ts` 중력+항력+마그누스 궤적 맞춤(refauto 와 같은 모델, 같은 추적점으로 ±0.5% 일치), 마지막에 다중 시작값
+  - `analyze.ts` 흐름·판정, `browser.ts` requestVideoFrameCallback + VideoFrame(그림·시각 일치), 처리 중 영상 일시정지
+- 화면 `app/analyze/freekick/page.tsx`: 장면 고르기 → 골대 4모서리·공 탭(돋보기, 끌어서 수정, 공 원 자동 맞춤·크기 조절) → 측정
+  → 속도·범위·거리·발사각·골라인 높이, 계산한 골대·궤적 겹쳐 그리기. `/analyze` 에 링크
+- **판정은 '추정'** (범위 표시). 이 구도에선 골대·공·키커 키로 초점거리가 정해지지 않음을 확인(사전값 없이 ±25%) →
+  키커 키 입력은 뺐다. 기기 화각을 레퍼런스로 확인해 `focalPrior` σ≤0.03 을 넘기면 '측정'
+- 검증 `npm run rv:check -- /Volumes/64B/freekick` (ffmpeg 필요, refauto 원장과 비교):
+  05 +1.7% · 08 −2.4% · 04 −0.5% · 11 −0.9% · IMG_0024 −12%(refauto 카메라의 골대 잔차가 7px 로 큼, 미해결) · 09 원장 골대 좌표 오류.
+  브라우저(Chromium, 05) 72~75 km/h, 7초 영상 분석 약 25초
+- 비용: 영상 원본 업로드(`/api/dataset/upload`) 기본 차단(410, `DATASET_UPLOAD=1`·`NEXT_PUBLIC_DATASET_UPLOAD=1` 로 켬 —
+  Vercel 4.5MB 한도·서버리스 디스크 휘발로 원래도 동작 안 함), `/api/reference-calibration` CDN 5분 캐시,
+  `/api/leaderboard` CDN 1분 캐시, `/leaderboard` 조회 60초 캐시(unstable_cache)
+- 확인: tsc·eslint 통과, `next build --webpack` 통과(샌드박스라 폰트는 가짜 응답). 실제 폰에서는 아직 안 돌려 봄
+- 후속: 폰 실기기(아이폰 Safari·안드로이드 Chrome) 속도·메모리 확인, 결과 저장/리더보드 연동(지금은 저장 안 함),
+  레퍼런스로 기기 화각 사전값 좁히기
+
+---
+
 ## 2026-09-28 · Claude — refauto 외부 확인·수정: `/admin/refauto` + Mac 자동 워커
 
 - DB: 마이그레이션 `20260928000000_add_refauto` (RefautoVideo·Kick·Image·Edit·State). Vercel 빌드의 `prisma migrate deploy` 로 적용

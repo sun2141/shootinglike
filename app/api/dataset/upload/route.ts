@@ -21,6 +21,12 @@ function getVideoExtension(file: File): string {
 }
 
 export async function POST(req: NextRequest) {
+  // 영상 원본 업로드는 기본으로 막아 둔다: Vercel 함수는 요청 본문 4.5MB 에서 잘리고,
+  // 서버리스 디스크(.data)는 요청이 끝나면 사라져 저장도 안 된다. 트래픽 비용만 생긴다.
+  // 다시 쓰려면 스토리지 직접 업로드(서명 URL)로 바꾼 뒤 DATASET_UPLOAD=1 로 켠다.
+  if (process.env.DATASET_UPLOAD !== "1") {
+    return NextResponse.json({ error: "Dataset upload is disabled" }, { status: 410 });
+  }
   try {
     const formData = await req.formData();
     const video = formData.get("video");

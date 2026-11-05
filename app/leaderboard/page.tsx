@@ -1,10 +1,24 @@
 import Link from "next/link";
 import { ArrowLeft, Trophy } from "lucide-react";
 import type { Prisma } from "@prisma/client";
+import { unstable_cache } from "next/cache";
 import { getPrisma } from "@/lib/prisma";
 
-// Server component
+// Server component. 빌드 때 DB 에 붙지 않도록 페이지는 요청마다 그리되,
+// 순위 조회 결과는 60초 캐시한다 — 조회 수가 늘어도 DB 조회는 1분에 한 번.
 export const dynamic = 'force-dynamic';
+
+const loadTop = unstable_cache(
+  async () =>
+    getPrisma().analysis.findMany({
+      take: 20,
+      // 구속 순위판이므로 속도가 먼저다. 저장 자체가 중력 검산을 통과한 측정만 들어온다.
+      orderBy: [{ estimatedSpeedKmh: 'desc' }, { formScore: 'desc' }],
+      include: { user: true },
+    }),
+  ['leaderboard-top20'],
+  { revalidate: 60 },
+);
 
 type LeaderboardAnalysis = Prisma.AnalysisGetPayload<{
   include: { user: true };
@@ -13,18 +27,7 @@ type LeaderboardAnalysis = Prisma.AnalysisGetPayload<{
 export default async function LeaderboardPage() {
   let analyses: LeaderboardAnalysis[] = [];
   try {
-    const prisma = getPrisma();
-    analyses = await prisma.analysis.findMany({
-      take: 20,
-      // 구속 순위판이므로 속도가 먼저다. 저장 자체가 중력 검산을 통과한 측정만 들어온다.
-      orderBy: [
-        { estimatedSpeedKmh: 'desc' },
-        { formScore: 'desc' }
-      ],
-      include: {
-        user: true
-      }
-    });
+    analyses = await loadTop();
   } catch (err) {
     console.error("DB connection error:", err);
     // Ignore error if DB is not connected yet, show empty list
