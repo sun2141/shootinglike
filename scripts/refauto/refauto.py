@@ -133,7 +133,7 @@ def run(folder, redo=False, only=None):
             dups.append(p)
             continue
         old = led["videos"].get(fp)
-        if old and known.get(fp) not in (None, p) and known[fp].exists():
+        if old and known.get(fp) is not None and known[fp].exists() and not lib.same(known[fp], p):
             print(f"- {p.name}: 이미 처리한 {old.get('file')} 과 같은 영상 — 건너뜀")
             dups.append(p)
             continue
@@ -165,7 +165,10 @@ def run(folder, redo=False, only=None):
         save_ledger(out, led)
         print(f"  → {status_ko(r)}")
         done.append(p.name)
-    lib.organize(folder, led, dups, should_stop=lib.paused)
+    try:
+        lib.organize(folder, led, dups, should_stop=lib.paused)
+    except Exception:
+        traceback.print_exc()                      # 정리가 실패해도 분석 결과 저장·업로드는 계속한다
     save_ledger(out, led)
     summary(led)
     return done

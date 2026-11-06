@@ -164,7 +164,8 @@ def solve(obs, size, init_fs=None, verbose=False):
     def refit_at(fv, x0):
         r = least_squares(lambda q: residuals(np.r_[fv, q], 0.8), x0[1:], loss="soft_l1")
         return r
-    grid = best.x[0] * np.array([0.85, 0.9, 0.95, 1.05, 1.1, 1.15])
+    # 경계(0.3W~5W) 밖의 시작값은 least_squares 가 거부하므로 안쪽으로 자른다 (경계 근처 f 에서 오류가 났었다)
+    grid = np.clip(best.x[0] * np.array([0.85, 0.9, 0.95, 1.05, 1.1, 1.15]), 0.3 * W + 1, 5.0 * W - 1)
     for fv in grid:
         r = refit_at(fv, best.x)
         if r.cost < best.cost - 1e-6:

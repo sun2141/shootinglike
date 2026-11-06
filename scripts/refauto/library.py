@@ -64,15 +64,44 @@ def iter_videos(folder):
 
 
 def rel(folder, p):
-    return nfc(str(p.relative_to(folder)))
+    try:
+        return nfc(str(p.relative_to(folder)))
+    except ValueError:                             # 이름 정규화가 달라 relative_to 가 실패하면 글자 단위로
+        a, b = nfc(str(p)), nfc(str(folder)).rstrip("/") + "/"
+        return a[len(b):] if a.startswith(b) else nfc(p.name)
+
+
+def real(p):
+    """디스크에 실제로 적힌 이름의 경로. macOS 는 한글 이름을 NFC 로 찾아도 열어 주지만, 이름 바꾸기·비교는
+    실제 이름(NFD 등)으로 해야 해서 단계마다 폴더를 읽어 맞는 항목을 고른다."""
+    p = Path(p)
+    if not p.is_absolute():
+        return p
+    cur = Path(p.parts[0])
+    for part in p.parts[1:]:
+        nxt = cur / part
+        try:
+            names = {nfc(q.name): q for q in cur.iterdir()} if cur.is_dir() else {}
+        except OSError:
+            names = {}
+        cur = names.get(nfc(part), nxt)
+    return cur
+
+
+def same(a, b):
+    """같은 파일·폴더인가 (이름 정규화·대소문자 차이 무시)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return nfc(str(a)) == nfc(str(b))
 
 
 def path_of(folder, v):
-    """원장 항목의 영상 파일. 경로 기록이 없거나 틀리면 이름으로 찾는다."""
+    """원장 항목의 영상 파일(실제 이름). 경로 기록이 없거나 틀리면 이름으로 찾는다."""
     if v.get("path"):
         p = folder / v["path"]
         if p.exists():
-            return p
+            return real(p)
     return find(folder, v.get("file", ""))
 
 
@@ -95,16 +124,24 @@ def video_status(v):
     return s if s in FOLDERS else None
 
 
-def _move(src, dst_dir):
-    dst_dir.mkdir(exist_ok=True)
-    dst = dst_dir / src.name
-    if dst.exists():
+def _move(src, dst_dir, log=print):
+    """dst_dir 로 옮긴다 (옆 .json 함께). 옮겼으면 새 경로, 아니면 None. 실패해도 예외를 내지 않는다."""
+    try:
+        dst_dir.mkdir(exist_ok=True)
+        dst_dir = real(dst_dir)
+        if same(src.parent, dst_dir):
+            return None
+        dst = dst_dir / src.name
+        if dst.exists():
+            return None
+        os.rename(src, dst)                        # 같은 USB 안에서는 이름 바꾸기라 중간에 빠져도 깨지지 않는다
+        side = real(src.with_suffix(".json"))
+        if side.exists() and not (dst_dir / side.name).exists():
+            os.rename(side, dst_dir / side.name)
+        return dst
+    except OSError as e:
+        log(f"  정리 실패: {src.name} → {dst_dir.name}/ ({e})")
         return None
-    os.rename(src, dst)                            # 같은 USB 안에서는 이름 바꾸기라 중간에 빠져도 깨지지 않는다
-    side = src.with_suffix(".json")
-    if side.exists() and not (dst_dir / side.name).exists():
-        os.rename(side, dst_dir / side.name)
-    return dst
 
 
 def organize(folder, led, dups=(), log=print, should_stop=lambda: False):
@@ -118,14 +155,17 @@ def organize(folder, led, dups=(), log=print, should_stop=lambda: False):
             continue
         st = video_status(v)
         target = folder / FOLDERS[st] if st in FOLDERS else None
-        if target is not None and p.parent != target:
-            q = _move(p, target)
+        if target is not None and not same(p.parent, target):
+            q = _move(p, target, log)
             if q is not None:
                 log(f"  정리: {rel(folder, p)} → {rel(folder, q)}")
                 p, moved = q, moved + 1
         v["path"] = rel(folder, p)
+    canon = [path_of(folder, v) for v in led["videos"].values()]
     for p in dups:                                 # 이름만 다른 같은 영상
-        if p.exists() and p.parent.name != FOLDERS["duplicate"] and _move(p, folder / FOLDERS["duplicate"]):
+        if any(c is not None and same(c, p) for c in canon):
+            continue                               # 원장이 가리키는 바로 그 파일이면 중복이 아니다 (안전장치)
+        if p.exists() and nfc(p.parent.name) != FOLDERS["duplicate"] and _move(p, folder / FOLDERS["duplicate"], log):
             log(f"  정리: {rel(folder, p)} → {FOLDERS['duplicate']}/ (같은 영상이 이미 있음)")
             moved += 1
     guide = folder / "_안내.txt"
