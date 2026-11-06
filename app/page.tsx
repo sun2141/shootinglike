@@ -58,9 +58,14 @@ export default function Home() {
           <div className="absolute left-1/2 top-full h-[64px] w-[128px] -translate-x-1/2 rounded-b-full border-2 border-t-0" style={line} />
         </section>
 
-        <p className="mx-auto mt-[92px] max-w-[30ch] break-keep text-center text-[15px] leading-relaxed sm:text-base">
-          프리킥을 옆에서 찍으면 공 속도를 측정합니다. 장비는 필요 없습니다. 검산을 통과한 값만 보여주고, 측정 안 된 경우엔 이유를
-          알려드립니다.
+        <p className="mx-auto mt-[92px] break-keep text-center text-[15px] leading-relaxed sm:text-base">
+          영상을 찍으면 공 속도를 측정합니다.
+          <br />
+          장비는 필요 없습니다.
+          <br />
+          검산을 통과한 값만 보여주고,
+          <br />
+          측정 안 된 경우엔 이유를 알려드립니다.
         </p>
 
         {/* 하프라인 + 센터서클: 주 버튼 */}
