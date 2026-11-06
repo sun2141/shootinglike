@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { ArrowLeft, Check, Cpu, Loader2, Pencil, RefreshCw, Upload, X } from "lucide-react";
 
@@ -74,6 +74,8 @@ type Tab = (typeof TABS)[number];
 
 type Item = { video: Video; kick: Kick | null; status: string };
 
+const noop = () => () => {};
+
 function ago(iso?: string) {
   if (!iso) return "없음";
   const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -143,7 +145,12 @@ export default function RefautoAdminPage() {
   }, [items, data]);
 
   // 탭을 고르기 전에는: '확인 필요'가 비어 있으면 손볼 것이 많은 '측정 불가'(없으면 전체)를 보여 준다
-  const tab: Tab = tabSel ?? (counts.review || !data ? "review" : counts.not_measurable ? "not_measurable" : "all");
+  // 대시보드에서 ?tab=… 으로 들어오면 그 탭부터
+  const urlTab = useSyncExternalStore(noop, () => new URLSearchParams(window.location.search).get("tab"), () => null);
+  const tab: Tab =
+    tabSel ??
+    ((TABS as readonly string[]).includes(urlTab ?? "") ? (urlTab as Tab) : null) ??
+    (counts.review || !data ? "review" : counts.not_measurable ? "not_measurable" : "all");
 
   const pending = useMemo(() => {
     const m = new Map<string, Edit>();

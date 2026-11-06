@@ -1,7 +1,7 @@
 # 페이지 주소
 
 배포 주소: https://shooting-like.vercel.app — 모든 화면은 휴대폰(가로 390px 기준)에서 쓰도록 맞춰 둠.
-관리자 화면 안의 '페이지 주소' 목록(`app/admin/page.tsx` 의 `PAGES`)과 같이 고친다.
+관리자 대시보드(`app/admin/AdminDashboard.tsx`)의 바로가기와 같이 고친다.
 
 ## 사용자
 | 주소 | 화면 | 비고 |
@@ -14,8 +14,8 @@
 ## 관리자 (링크 없음 · 저장·삭제는 `ADMIN_REFERENCE_TOKEN` 필요)
 | 주소 | 화면 | 비고 |
 |---|---|---|
-| `/admin` | 관리자 입구 | 페이지 주소 목록 포함 |
-| `/admin/refauto` | 프리킥 레퍼런스 자동 작업 | Mac 워커(`scripts/refauto`) 결과 확인·확정·제외·수정(골대·공·키커 클릭) |
+| `/admin` | 관리자 대시보드 | 지금 할 일 · 자동화 상태 · DB 현황 · 관리/사용자 화면 바로가기 · 아직 없는 기능 |
+| `/admin/refauto` | 자동 분석 결과 | Mac 워커(`scripts/refauto`) 결과 확인·확정·제외·수정. `?tab=review` 처럼 탭 지정 가능 |
 | `/admin/references` | 레퍼런스 정답표 | 속도를 아는 클립 일괄 업로드·비교 (PC 권장: 브라우저 ffmpeg) |
 | `/admin/records` | 기록 관리 | 리더보드 기록 삭제 |
 
@@ -27,4 +27,4 @@
 
 ## API (참고)
 `/api/analyze` · `/api/leaderboard` · `/api/reference-calibration` · `/api/dataset/upload`(기본 꺼짐) ·
-`/api/admin/references[/id]` · `/api/admin/records` · `/api/admin/refauto` (`/sync` `/images` `/image/[id]` `/edits` `/register`)
+`/api/admin/overview`(대시보드 현황) · `/api/admin/references[/id]` · `/api/admin/records` · `/api/admin/refauto` (`/sync` `/images` `/image/[id]` `/edits` `/register`)
