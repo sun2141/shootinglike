@@ -215,10 +215,18 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="업로드 내용만 보여 주고 올리지 않음")
     ap.add_argument("--cloud", action="store_true",
                     help="관리자 화면과 동기화: 수정 요청 반영 → 새 영상 처리 → 결과 올리기 (자동 실행용)")
+    ap.add_argument("--collect", action="store_true",
+                    help="유튜브에서 속도를 아는 킥 영상을 찾아 받아 이 폴더에 넣기 (자동 실행용, collect.py)")
+    ap.add_argument("--queries", type=int, help="--collect: 한 번에 쓸 검색어 수 (기본 4)")
+    ap.add_argument("--max-downloads", type=int, help="--collect: 하루에 받을 최대 영상 수 (기본 12)")
     a = ap.parse_args()
     import library
     folder = library.resolve(Path(a.folder).expanduser())
-    if a.cloud:
+    if a.collect:
+        import collect
+        opts = {k: v for k, v in (("queries", a.queries), ("daily_downloads", a.max_downloads)) if v}
+        collect.cycle(folder, a.api, dry_run=a.dry_run, opts=opts)
+    elif a.cloud:
         import cloud
         cloud.cycle(folder, a.api)
     elif a.review:

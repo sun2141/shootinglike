@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 /**
  * Mac 워커 → 계산 결과 올리기.
- *   {videos: SyncVideo[], state?: {worker: {...}, manual_refs: [...]}}
+ *   {videos: SyncVideo[], state?: {worker: {...}, manual_refs: [...], collector: {...}}}  (collector = 유튜브 수집 현황)
  * 영상 단위로 통째로 바꾼다(그 영상의 킥 목록 = 보낸 것). 이미 등록한 referenceId 는 유지.
  */
 export async function POST(req: Request) {
@@ -41,11 +41,24 @@ export async function POST(req: Request) {
       await tx.refautoVideo.upsert({ where: { id }, update: videoData, create: { id, ...videoData } });
       const old = await tx.refautoKick.findMany({ where: { videoId: id } });
       const keepRef = new Map(old.map((k) => [k.kick, k.referenceId]));
+      // 화면에서 입력한 정답(truth·penalty)은 Mac 이 아직 모르는 사이에 다시 올려도 지워지지 않게 남긴다
+      const keepTruth = new Map<number, Record<string, unknown>>();
+      for (const k of old) {
+        const d = (k.data as Record<string, unknown> | null) ?? {};
+        if (d.truth !== undefined || d.penalty !== undefined) keepTruth.set(k.kick, { truth: d.truth ?? null, penalty: d.penalty ?? null, t_kick: d.t_kick });
+      }
       const sent = new Set<number>();
       for (const k of kicks) {
         const kick = Math.round(Number(k.kick));
         if (!Number.isFinite(kick) || kick < 1) continue;
         sent.add(kick);
+        const kd: Record<string, unknown> = { ...((k.data as Record<string, unknown> | null) ?? {}) };
+        const prev = keepTruth.get(kick);
+        const sameKick = prev && (typeof prev.t_kick !== "number" || typeof kd.t_kick !== "number" || Math.abs(prev.t_kick - (kd.t_kick as number)) < 0.4);
+        if (prev && sameKick && kd.truth === undefined && kd.penalty === undefined) {
+          kd.truth = prev.truth;
+          kd.penalty = prev.penalty;
+        }
         const data = {
           status: str(k.status, 40) ?? "review",
           source: str(k.source, 40) ?? "auto",
@@ -56,7 +69,7 @@ export async function POST(req: Request) {
           distM: num(k.distM),
           rmsPx: num(k.rmsPx),
           trackPoints: num(k.trackPoints) === null ? null : Math.round(Number(k.trackPoints)),
-          data: json(k.data ?? null) as Prisma.InputJsonValue,
+          data: json(kd) as Prisma.InputJsonValue,
           overlayImageId: str(k.overlayImageId, 40),
           frameImageId: str(k.frameImageId, 40),
           candidateFrames: json(k.candidateFrames ?? []) as Prisma.InputJsonValue,
@@ -74,7 +87,7 @@ export async function POST(req: Request) {
   }
 
   if (body.state && typeof body.state === "object") {
-    for (const key of ["worker", "manual_refs"] as const) {
+    for (const key of ["worker", "manual_refs", "collector"] as const) {
       if (body.state[key] === undefined) continue;
       const value = json(body.state[key]) as Prisma.InputJsonValue;
       await prisma.refautoState.upsert({ where: { key }, update: { value }, create: { key, value } });

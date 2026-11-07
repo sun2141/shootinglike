@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { verifyAdminReferenceRequest } from "@/lib/admin-auth";
 import { getPrisma } from "@/lib/prisma";
-import { EDIT_ACTIONS, badRequest, json, num, str, type EditAction } from "@/lib/refauto";
+import { EDIT_ACTIONS, badRequest, cleanTruth, json, num, str, type EditAction } from "@/lib/refauto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,6 +66,7 @@ function cleanMeta(m: unknown) {
 /**
  * 관리자 화면 → 수정 요청.
  *   {videoId, kick, action: accept|reject|recompute, meta?, clicks?}
+ *   {videoId, kick, action: truth, truth?: {value, unit, device, note} | null, penalty?: boolean | null}
  * 확정·제외는 화면에 바로 반영하고, Mac 이 켜지면 영상 옆 메모(.json)에도 남긴다.
  */
 export async function POST(req: Request) {
@@ -86,6 +87,30 @@ export async function POST(req: Request) {
     include: { video: { select: { meta: true } } },
   });
   if (!target) return NextResponse.json({ error: "킥을 찾을 수 없습니다." }, { status: 404 });
+
+  if (action === "truth") {
+    // 정답(레이더 속도·페널티킥 여부)은 다시 계산할 필요가 없다 → 화면(DB)에 바로 넣고, Mac 에는 백업용으로만 보낸다
+    const truth = body.truth === undefined ? undefined : cleanTruth(body.truth);
+    if (truth === undefined && body.truth !== undefined) return badRequest("속도 값이 올바르지 않습니다 (15~220 km/h).");
+    const penalty = body.penalty === true ? true : body.penalty === false ? false : null;
+    const data = { ...((target.data as Record<string, unknown> | null) ?? {}) };
+    if (truth !== undefined) data.truth = truth;
+    data.penalty = penalty;
+    await prisma.refautoKick.update({ where: { id: target.id }, data: { data: json(data) as Prisma.InputJsonValue } });
+    await prisma.refautoEdit.updateMany({
+      where: { videoId, kick, status: "pending", action },
+      data: { status: "superseded", doneAt: new Date() },
+    });
+    const edit = await prisma.refautoEdit.create({
+      data: {
+        videoId,
+        kick,
+        action,
+        meta: json({ truth: data.truth ?? null, penalty, t_kick: data.t_kick ?? null }) as Prisma.InputJsonValue,
+      },
+    });
+    return NextResponse.json({ edit, data });
+  }
 
   const meta = cleanMeta(body.meta);
   const clicks = cleanClicks(body.clicks);

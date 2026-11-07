@@ -9,7 +9,9 @@ import {
   CircleCheck,
   Cpu,
   Database,
+  ExternalLink,
   Film,
+  Gauge,
   KeyRound,
   ListOrdered,
   Loader2,
@@ -37,7 +39,26 @@ type Overview = {
   records: { total: number; week: number; users: number; last: string | null };
   references: { total: number; active: number; last: string | null };
   refauto: { videos: number; kicks: Record<string, number>; editsPending: number; manualRefs: number; worker: Worker | null };
+  collector?: Collector | null;
+  accuracy?: Accuracy;
 };
+type CollectItem = { id: string; title?: string; decision?: string; reason?: string; device?: string; priority?: number; file?: string | null; error?: string | null };
+type Collector = {
+  at?: string;
+  host?: string;
+  last?: { found?: number; new?: number; keep?: number; review?: number; reject?: number; downloaded?: number; moved?: number; waiting?: number; errors?: string[]; queries?: string[] };
+  totals?: { seen?: number; keep?: number; review?: number; reject?: number; downloaded?: number };
+  queue?: number;
+  downloaded?: CollectItem[];
+  review?: CollectItem[];
+};
+type ErrSummary = { n: number; bias: number | null; medianAbs: number | null; maxAbs: number | null; items: { file: string; kick: number; status: string; measured: number; truth: number; err: number }[] };
+type Accuracy = { radar: { all: ErrSummary; sure: ErrSummary }; penalty: ErrSummary; otherTruth: number };
+
+const TARGET_N = 20; // 구도별 이 정도 모이면 평균 치우침을 ±2% 안으로 안다 (레이더 1회 ±6% 기준)
+function pct(x: number | null | undefined) {
+  return x === null || x === undefined ? "–" : `${x >= 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(1)}%`;
+}
 
 const VERDICTS: { key: string; label: string; color: string; tab: string }[] = [
   { key: "A", label: "확정", color: "#39FF14", tab: "A" },
@@ -278,35 +299,13 @@ export default function AdminDashboard({ configured, developmentOpen }: { config
             </Link>
           </div>
 
-          <div className="glass-card p-4 sm:p-5 flex flex-col gap-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <IconBox color="var(--color-neon-blue)">
-                  <Search size={18} />
-                </IconBox>
-                <div>
-                  <div className="font-semibold">유튜브 영상 수집</div>
-                  <p className="text-xs text-gray-400">검색 → AI 선별(Jev) → 다운로드 → 구속 측정</p>
-                </div>
-              </div>
-              <span className="shrink-0 rounded-full border border-white/15 px-2 py-0.5 text-[11px] text-gray-300">Mac 명령으로만</span>
-            </div>
-            <ol className="grid gap-2 text-xs text-gray-300">
-              <li className="flex gap-2 rounded-lg bg-white/5 px-3 py-2">
-                <span className="font-mono text-[var(--color-neon-blue)]">1</span>
-                <span>
-                  후보 찾기·선별 <code className="font-mono text-gray-400">npm run jev:filter -- --search &quot;프리킥 구속&quot;</code>
-                </span>
-              </li>
-              <li className="flex gap-2 rounded-lg bg-white/5 px-3 py-2">
-                <span className="font-mono text-[var(--color-neon-blue)]">2</span>
-                <span>
-                  받기·측정 <code className="font-mono text-gray-400">npm run jev:collect</code> → <code className="font-mono text-gray-400">~/shooting-videos</code>
-                </span>
-              </li>
-            </ol>
-            <p className="text-xs text-gray-500">자동 실행·이 화면 연결·DB 저장은 아직 없습니다 (아래 &apos;아직 없는 기능&apos;).</p>
-          </div>
+          <CollectorCard c={data?.collector ?? null} now={data?.generatedAt} />
+        </section>
+
+        {/* 측정 정확도 */}
+        <section className="flex flex-col gap-3">
+          <SectionTitle>측정 정확도 (정답과 비교)</SectionTitle>
+          <AccuracyCard a={data?.accuracy} />
         </section>
 
         {/* 데이터베이스 */}
@@ -382,8 +381,9 @@ export default function AdminDashboard({ configured, developmentOpen }: { config
 }
 
 const MISSING: [string, string][] = [
-  ["유튜브 수집 자동 실행", "jev:filter·jev:collect 를 Mac 이 정해진 시간에 돌리고 결과를 이 화면에서 보기 — 지금은 손으로 명령 실행"],
-  ["수집 영상 → 자동 분석 연결", "유튜브에서 받은 영상(~/shooting-videos, 옆 구도)은 USB 자동 분석(뒤 대각선)과 따로 놉니다"],
+  ["옆 구도 영상 자동 수집·측정", "유튜브 수집은 대각선 뒤 분석(refauto)으로만 들어갑니다 — 옆에서 찍은 영상(구속 측정 방식)은 따로 연결 필요"],
+  ["골대 없는 영상 보정", "작은 네트·리바운더·측정 부스에 차는 영상은 골대가 없어 지금은 측정 불가 — 네트·선·공 크기로 보정하는 방법 필요"],
+  ["레이더 숫자 자동 판독", "정답 숫자는 사람이 영상을 보고 입력 (레이더 화면은 자동 판독이 잘 안 됨)"],
   ["레퍼런스로 앱 보정", "정답표는 아직 '보정에 사용 안 함' — 같은 영상의 앱 측정값과 짝지어 보정 계수를 내는 단계가 없음"],
   ["프리킥 측정 결과 저장", "/analyze/freekick 결과는 저장·리더보드에 올라가지 않음"],
   ["알림", "확인할 킥이 생기거나 Mac 이 오래 꺼져 있으면 휴대폰으로 알리기"],
@@ -475,5 +475,138 @@ function NavRow({
       </div>
       <ChevronRight size={18} className="shrink-0 text-gray-500 group-hover:translate-x-0.5 group-hover:text-gray-300 transition" />
     </Link>
+  );
+}
+
+function CollectorCard({ c, now }: { c: Collector | null; now?: string }) {
+  const age = c?.at && now ? (new Date(now).getTime() - new Date(c.at).getTime()) / 1000 : Infinity;
+  const state = !c ? "unknown" : age < 7 * 3600 ? "on" : age < 26 * 3600 ? "idle" : "off";
+  const t = c?.totals ?? {};
+  const last = c?.last ?? {};
+  return (
+    <div className="glass-card p-4 sm:p-5 flex flex-col gap-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <IconBox color="var(--color-neon-blue)">
+            <Search size={18} />
+          </IconBox>
+          <div>
+            <div className="font-semibold">유튜브 레퍼런스 수집</div>
+            <p className="text-xs text-gray-400">6시간마다 검색 → AI 선별(레이더·페널티킥) → 받기 → USB 폴더 → 자동 분석</p>
+          </div>
+        </div>
+        <StatusPill state={state} />
+      </div>
+      {!c ? (
+        <p className="text-xs text-gray-400">
+          아직 한 번도 실행되지 않았습니다. Mac 에서 <code className="font-mono text-gray-300">bash scripts/refauto/install_launchd.sh /Volumes/64B/freekick</code> 를 실행하면 시작됩니다.
+        </p>
+      ) : (
+        <>
+          <div className="grid grid-cols-4 gap-2 text-center">
+            <Stat label="마지막 실행" value={now ? ago(c.at, now) : "–"} />
+            <Stat label="살펴본 영상" value={`${t.seen ?? 0}`} />
+            <Stat label="받음" value={`${t.downloaded ?? 0}`} />
+            <Stat label="받을 차례" value={`${c.queue ?? 0}`} />
+          </div>
+          <p className="text-[11px] text-gray-500">
+            지난 실행: 새 영상 {last.new ?? 0} · 받기 {last.keep ?? 0} · 애매 {last.review ?? 0} · 제외 {last.reject ?? 0} · 받음 {last.downloaded ?? 0}
+            {last.waiting ? ` · USB 기다림 ${last.waiting}` : ""}
+          </p>
+          {(last.errors ?? []).length > 0 && (
+            <p className="rounded-lg border border-yellow-300/30 bg-yellow-300/10 px-3 py-2 text-xs text-yellow-100">{last.errors!.join(" · ")}</p>
+          )}
+          {(c.downloaded ?? []).length > 0 && (
+            <ul className="flex flex-col gap-1 text-xs">
+              {c.downloaded!.slice(0, 5).map((v) => (
+                <li key={v.id}>
+                  <a href={`https://www.youtube.com/watch?v=${v.id}`} target="_blank" rel="noreferrer" className="flex items-start gap-1.5 text-gray-300 hover:text-white">
+                    <ExternalLink size={12} className="mt-0.5 shrink-0 text-gray-500" />
+                    <span className="min-w-0 flex-1 truncate">{v.title ?? v.id}</span>
+                    <span className="shrink-0 text-gray-500">{v.reason === "penalty" ? "페널티킥" : "레이더"}</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+          <Link
+            href="/admin/refauto?tab=youtube"
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-white/15 py-2.5 text-sm font-semibold hover:bg-white/5"
+          >
+            받은 영상 분석 결과 · 정답 입력 <ArrowUpRight size={16} />
+          </Link>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AccuracyCard({ a }: { a?: Accuracy }) {
+  const r = a?.radar.all;
+  const sure = a?.radar.sure;
+  const p = a?.penalty;
+  return (
+    <div className="glass-card p-4 sm:p-5 flex flex-col gap-4">
+      <div className="flex items-start gap-3">
+        <IconBox color="#ffc53d">
+          <Gauge size={18} />
+        </IconBox>
+        <div>
+          <div className="font-semibold">정답이 있는 킥으로 오차 확인</div>
+          <p className="text-xs text-gray-400">
+            레이더 숫자는 킥 하나당 ±6% 흔들려서, 하나보다 <b className="text-gray-300">여럿의 평균</b>을 봅니다. 구도별 {TARGET_N}개가 목표입니다.
+          </p>
+        </div>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <ErrBox title="레이더 정답 (전체)" s={r} note="측정 ÷ 정답 − 1" />
+        <ErrBox title="레이더 정답 (확정·수동 확정만)" s={sure} note="자동 판정이 믿을 만한 킥" />
+        <ErrBox title="페널티킥 거리" s={p} note="계산한 킥 거리 ÷ 11 m − 1 · 거리 축척이 틀린 만큼 속도도 틀림" />
+        <div className="rounded-xl bg-white/5 p-3 text-xs text-gray-400 flex flex-col justify-center gap-1">
+          <span>스마트볼·앱 등 통계 제외 정답 {a?.otherTruth ?? 0}개</span>
+          <Link href="/admin/refauto?tab=truth" className="text-sky-300 hover:underline">
+            정답 있는 킥 모두 보기 →
+          </Link>
+        </div>
+      </div>
+      {r && r.items.length > 0 && (
+        <ul className="flex flex-col gap-1 text-xs font-mono text-gray-300">
+          {r.items.slice(0, 5).map((i) => (
+            <li key={`${i.file}#${i.kick}`} className="flex justify-between gap-2">
+              <span className="truncate font-sans">
+                {i.file} · 킥{i.kick}
+              </span>
+              <span className="shrink-0">
+                {i.measured.toFixed(1)} / {i.truth.toFixed(1)} <span className={Math.abs(i.err) <= 0.07 ? "text-[var(--color-neon-green)]" : "text-orange-300"}>{pct(i.err)}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ErrBox({ title, s, note }: { title: string; s?: ErrSummary; note: string }) {
+  const n = s?.n ?? 0;
+  return (
+    <div className="rounded-xl bg-white/5 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[11px] text-gray-400">{title}</span>
+        <span className="font-mono text-[11px] text-gray-500">
+          {n}/{TARGET_N}
+        </span>
+      </div>
+      <div className="mt-1 flex items-baseline gap-2">
+        <span className="font-mono text-xl font-bold">{n ? pct(s!.bias) : "–"}</span>
+        <span className="text-[11px] text-gray-400">평균 치우침</span>
+      </div>
+      <div className="text-[11px] text-gray-500">
+        {n ? `오차 중앙값 ${pct(s!.medianAbs).replace("+", "±")} · 최대 ${pct(s!.maxAbs).replace("+", "±")}` : "아직 없음"} · {note}
+      </div>
+      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/5">
+        <div className="h-full rounded-full bg-[#ffc53d]" style={{ width: `${Math.min(100, (100 * n) / TARGET_N)}%` }} />
+      </div>
+    </div>
   );
 }

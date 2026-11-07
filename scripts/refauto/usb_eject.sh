@@ -39,8 +39,12 @@ trap 'rm -f "$PAUSE"; echo; echo "취소했습니다. 분석은 계속됩니다.
 
 echo "USB: $VOL"
 echo "분석 워커에 일시정지를 걸었습니다. 지금 처리 중인 영상까지만 마치고 멈춥니다..."
-# USB 의 영상을 읽는 분석 실행(자동·수동)이 끝날 때까지. 확인 페이지(--review)는 파일을 잡고 있지 않으니 기다리지 않는다
-busy() { pgrep -lf "scripts/refauto/refauto.py" 2>/dev/null | grep -v -- "--review" | grep -q .; }
+# USB 의 영상을 읽는 분석 실행(자동·수동)이 끝날 때까지. 확인 페이지(--review)는 파일을 잡고 있지 않으니 기다리지 않는다.
+# 유튜브 수집(--collect)은 Mac 안에서 받으므로 기다리지 않고, USB 로 옮기는 중(.delivering)일 때만 기다린다
+busy() {
+  pgrep -lf "scripts/refauto/refauto.py" 2>/dev/null | grep -v -- "--review" | grep -v -- "--collect" | grep -q . && return 0
+  [[ -f "$STATE/collect/.delivering" ]] && pgrep -f -- "refauto.py.*--collect" >/dev/null 2>&1
+}
 start=$(date +%s)
 while busy; do
   printf "\r  기다리는 중 %ds (Ctrl+C 로 취소)" $(( $(date +%s) - start ))

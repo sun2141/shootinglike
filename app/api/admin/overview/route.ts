@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyAdminReferenceRequest } from "@/lib/admin-auth";
 import { getPrisma } from "@/lib/prisma";
+import { accuracyStats } from "@/lib/refauto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,6 +31,7 @@ export async function GET(req: Request) {
       lastRef,
       dbSize,
       images,
+      measured,
     ] = await Promise.all([
       prisma.analysis.count(),
       prisma.analysis.count({ where: { createdAt: { gte: weekAgo } } }),
@@ -44,6 +46,11 @@ export async function GET(req: Request) {
       prisma.referenceVideo.findFirst({ orderBy: { createdAt: "desc" }, select: { createdAt: true } }),
       prisma.$queryRaw<{ bytes: bigint }[]>`SELECT pg_database_size(current_database()) AS bytes`,
       prisma.$queryRaw<{ n: bigint; bytes: bigint }[]>`SELECT count(*) AS n, COALESCE(sum(octet_length(bytes)), 0) AS bytes FROM "RefautoImage"`,
+      // 정답 비교용: 속도나 거리가 계산된 킥만 (몇백 건 이하)
+      prisma.refautoKick.findMany({
+        where: { OR: [{ speedKmh: { not: null } }, { distM: { not: null } }] },
+        select: { kick: true, status: true, speedKmh: true, distM: true, data: true, video: { select: { file: true } } },
+      }),
     ]);
 
     const kicks: Record<string, number> = {};
@@ -60,6 +67,8 @@ export async function GET(req: Request) {
       records: { total: analyses, week: analysesWeek, users, last: lastAnalysis?.createdAt ?? null },
       references: { total: refs, active: refsActive, last: lastRef?.createdAt ?? null },
       refauto: { videos: videos, kicks, editsPending, manualRefs, worker: state.worker ?? null },
+      collector: state.collector ?? null,
+      accuracy: accuracyStats(measured),
     });
   } catch (error) {
     console.error("admin overview failed:", error);

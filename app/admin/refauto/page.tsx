@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
-import { ArrowLeft, Check, Cpu, Loader2, Pencil, RefreshCw, Upload, X } from "lucide-react";
+import { ArrowLeft, Check, Cpu, ExternalLink, Gauge, Loader2, Pencil, RefreshCw, Upload, X } from "lucide-react";
 
 /**
  * 프리킥 레퍼런스 자동 작업 결과 (scripts/refauto 가 Mac 에서 올린 것).
@@ -38,9 +38,15 @@ type Video = {
   status: string;
   reason: string | null;
   meta: Record<string, unknown> | null;
-  info: { width?: number; height?: number; rotate?: number } | null;
+  info: { width?: number; height?: number; rotate?: number; source?: Source } | null;
   kicks: Kick[];
 };
+/** 유튜브 수집(scripts/refauto/collect.py)으로 들어온 영상의 출처와 Jev 판단 */
+type Source = { id: string; url: string; title?: string; channel?: string; device?: string; radar?: number; smart?: number; penalty?: number; reason?: string };
+type Truth = { kmh: number; value: number; unit: "kmh" | "mph"; device: string; note?: string | null };
+const DEVICE_KO: Record<string, string> = { radar: "레이더", tracking: "추적 장비", smart_ball: "스마트볼·앱", other: "기타·모름" };
+const JEV_DEVICE_KO: Record<string, string> = { radar: "레이더", smart_ball_or_app: "스마트볼·앱", tracking_system: "추적 장비", none_or_unknown: "측정 없음·모름" };
+const PENALTY_M = 11;
 type Edit = { id: string; videoId: string; kick: number; action: string; status: string; result: string | null; createdAt: string };
 type ManualRef = { file: string; kick: number; status: string; speed_kmh: number; speed_range?: number[]; dist_m?: number; result?: string; method?: string };
 type Payload = {
@@ -69,7 +75,9 @@ const STATUS_COLOR: Record<string, string> = {
   not_freekick: "text-gray-400 border-gray-500/40",
   error: "text-red-300 border-red-300/40",
 };
-const TABS = ["review", "B", "A", "manual", "not_measurable", "not_freekick", "rejected", "manual_refs", "all"] as const;
+const TABS = ["review", "B", "A", "manual", "not_measurable", "not_freekick", "rejected", "truth", "youtube", "manual_refs", "all"] as const;
+const TAB_KO: Record<string, string> = { all: "전체", manual_refs: "수동 분석", truth: "정답 있음", youtube: "유튜브 수집" };
+const hasTruth = (k: Kick | null) => !!k && (!!(k.data?.truth as Truth | undefined) || k.data?.penalty === true);
 type Tab = (typeof TABS)[number];
 
 type Item = { video: Video; kick: Kick | null; status: string };
@@ -140,7 +148,11 @@ export default function RefautoAdminPage() {
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: items.length, manual_refs: data?.state.manual_refs?.length ?? 0 };
-    for (const i of items) c[i.status] = (c[i.status] ?? 0) + 1;
+    for (const i of items) {
+      c[i.status] = (c[i.status] ?? 0) + 1;
+      if (hasTruth(i.kick)) c.truth = (c.truth ?? 0) + 1;
+      if (i.video.info?.source) c.youtube = (c.youtube ?? 0) + 1;
+    }
     return c;
   }, [items, data]);
 
@@ -178,7 +190,17 @@ export default function RefautoAdminPage() {
     [headers, load]
   );
 
-  const filtered = useMemo(() => (tab === "all" ? items : items.filter((i) => i.status === tab)), [items, tab]);
+  const filtered = useMemo(
+    () =>
+      tab === "all"
+        ? items
+        : tab === "truth"
+          ? items.filter((i) => hasTruth(i.kick))
+          : tab === "youtube"
+            ? items.filter((i) => i.video.info?.source)
+            : items.filter((i) => i.status === tab),
+    [items, tab]
+  );
   // 휴대폰 데이터·DB 읽기를 아끼려고 카드(이미지)는 12개씩만 띄운다
   const [limit, setLimit] = useState(PAGE);
   const shown = useMemo(() => filtered.slice(0, limit), [filtered, limit]);
@@ -265,7 +287,7 @@ export default function RefautoAdminPage() {
                 tab === t ? "bg-[var(--color-neon-green)] text-black border-transparent" : "border-white/15 text-gray-300 hover:bg-white/5"
               }`}
             >
-              {t === "all" ? "전체" : t === "manual_refs" ? "수동 분석" : STATUS_KO[t]} {counts[t] ?? 0}
+              {TAB_KO[t] ?? STATUS_KO[t]} {counts[t] ?? 0}
             </button>
           ))}
         </div>
@@ -345,7 +367,17 @@ export default function RefautoAdminPage() {
                         ))}
                       </ul>
                     )}
-                    {wait && (
+                    {it.video.info?.source && <SourceLine src={it.video.info.source} />}
+                    {k && (
+                      <TruthBox
+                        kick={k}
+                        busy={loading}
+                        onSave={(truth, penalty) =>
+                          post("/api/admin/refauto/edits", { videoId: it.video.id, kick: k.kick, action: "truth", truth, penalty }, "정답을 저장했습니다.")
+                        }
+                      />
+                    )}
+                    {wait && wait.action !== "truth" && (
                       <div className="text-xs text-yellow-200">
                         Mac 반영 대기 ({wait.action === "recompute" ? "다시 계산" : wait.action === "accept" ? "확정 기록" : "제외 기록"})
                       </div>
@@ -413,6 +445,119 @@ export default function RefautoAdminPage() {
             if (ok) setEditing(null);
           }}
         />
+      )}
+    </div>
+  );
+}
+
+function pct(x: number) {
+  return `${x >= 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(1)}%`;
+}
+
+function SourceLine({ src }: { src: Source }) {
+  return (
+    <a href={src.url} target="_blank" rel="noreferrer" className="flex items-start gap-1.5 text-xs text-sky-300 hover:underline">
+      <ExternalLink size={13} className="mt-0.5 shrink-0" />
+      <span className="break-all">
+        유튜브 · {src.title ?? src.id}
+        {src.device ? <span className="text-gray-400"> — Jev 추정: {JEV_DEVICE_KO[src.device] ?? src.device}</span> : null}
+      </span>
+    </a>
+  );
+}
+
+/**
+ * 정답 입력: 영상 속 레이더 숫자, 그리고 페널티킥(킥 지점~골라인 11 m)인지.
+ * 레이더(·추적 장비) 숫자만 오차 통계에 쓴다. 스마트볼·앱 숫자는 20% 넘게 틀릴 수 있어 기록만 한다.
+ */
+function TruthBox({ kick, busy, onSave }: { kick: Kick; busy: boolean; onSave: (truth: Partial<Truth> | null, penalty: boolean | null) => Promise<boolean> }) {
+  const d = kick.data ?? {};
+  const truth = (d.truth as Truth | null | undefined) ?? null;
+  const penalty = d.penalty === true ? true : d.penalty === false ? false : null;
+  const p0 = Array.isArray(d.p0) ? (d.p0 as number[]) : null;
+  const looksPenalty = penalty === null && kick.distM != null && kick.distM > 9.8 && kick.distM < 12.2 && (!p0 || Math.abs(p0[0]) < 1.5);
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState(truth ? String(truth.value) : "");
+  const [unit, setUnit] = useState<"kmh" | "mph">(truth?.unit ?? "kmh");
+  const [device, setDevice] = useState(truth?.device ?? "radar");
+  const [pen, setPen] = useState(penalty === true);
+  const err = truth && kick.speedKmh ? kick.speedKmh / truth.kmh - 1 : null;
+  const penErr = penalty && kick.distM ? kick.distM / PENALTY_M - 1 : null;
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs flex flex-col gap-1.5">
+      {truth && (
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="text-gray-400">정답</span>
+          <span className="font-mono font-semibold">{truth.kmh.toFixed(1)} km/h</span>
+          {truth.unit === "mph" && <span className="text-gray-500">({truth.value} mph)</span>}
+          <span className="text-gray-400">· {DEVICE_KO[truth.device] ?? truth.device}</span>
+          {err !== null && (
+            <span className={`font-mono font-semibold ${Math.abs(err) <= 0.07 ? "text-[var(--color-neon-green)]" : "text-orange-300"}`}>
+              측정 {pct(err)}
+            </span>
+          )}
+          {truth.device === "smart_ball" && <span className="text-gray-500">(통계 제외)</span>}
+        </div>
+      )}
+      {penalty && (
+        <div>
+          <span className="text-gray-400">페널티킥</span>
+          {penErr !== null && (
+            <span className={`ml-2 font-mono ${Math.abs(penErr) <= 0.05 ? "text-[var(--color-neon-green)]" : "text-orange-300"}`}>
+              계산 거리 {kick.distM!.toFixed(1)} m ({pct(penErr)})
+            </span>
+          )}
+        </div>
+      )}
+      {looksPenalty && <div className="text-gray-400">킥 거리 {kick.distM!.toFixed(1)} m — 페널티킥이면 정답 입력에서 표시하세요</div>}
+      {!open ? (
+        <button onClick={() => setOpen(true)} className="flex items-center gap-1 self-start text-sky-300">
+          <Gauge size={13} /> {truth || penalty ? "정답 고치기" : "정답 입력 (레이더 숫자 · 페널티킥)"}
+        </button>
+      ) : (
+        <div className="flex flex-col gap-2 pt-1">
+          <div className="flex gap-2">
+            <input
+              inputMode="decimal"
+              value={value}
+              onChange={(e) => setValue(e.target.value.replace(/[^0-9.]/g, ""))}
+              placeholder="영상 속 속도"
+              className="min-w-0 flex-1 rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-base sm:text-sm font-mono"
+            />
+            <select value={unit} onChange={(e) => setUnit(e.target.value as "kmh" | "mph")} className="rounded-lg border border-white/15 bg-black/30 px-2 text-base sm:text-sm">
+              <option value="kmh">km/h</option>
+              <option value="mph">mph</option>
+            </select>
+          </div>
+          <select value={device} onChange={(e) => setDevice(e.target.value)} className="rounded-lg border border-white/15 bg-black/30 px-2 py-2 text-base sm:text-sm">
+            <option value="radar">레이더 건·레이더 부스</option>
+            <option value="tracking">추적 장비 (TrackMan 등)</option>
+            <option value="smart_ball">스마트볼·앱 (통계 제외)</option>
+            <option value="other">기타·모름 (통계 제외)</option>
+          </select>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={pen} onChange={(e) => setPen(e.target.checked)} className="h-4 w-4" />
+            페널티킥 (페널티 지점에서 참)
+          </label>
+          <div className="flex gap-2">
+            <button
+              disabled={busy}
+              onClick={async () => {
+                const v = Number(value);
+                const t = value && Number.isFinite(v) && v > 0 ? { value: v, unit, device } : null;
+                if (await onSave(t, pen ? true : penalty === true ? false : null)) setOpen(false);
+              }}
+              className="flex-1 rounded-lg bg-sky-400 px-3 py-2 text-sm font-semibold text-black disabled:opacity-50"
+            >
+              저장
+            </button>
+            <button onClick={() => setOpen(false)} className="rounded-lg border border-white/15 px-3 py-2 text-sm">
+              닫기
+            </button>
+          </div>
+          <p className="text-gray-500">숫자를 비우고 저장하면 정답이 지워집니다. 레이더 숫자만 오차 통계에 들어갑니다.</p>
+        </div>
       )}
     </div>
   );

@@ -101,6 +101,35 @@ bash scripts/refauto/install_launchd.sh --uninstall                   # 끄기
 - DB: RefautoVideo / RefautoKick / RefautoImage(BYTEA) / RefautoEdit / RefautoState (마이그레이션 20260928000000_add_refauto)
 - 겹쳐 실행 방지: `_refauto/.cloud.lock` (잡고 있던 프로세스가 없으면 바로 해제)
 
+## 유튜브 레퍼런스 수집 (`collect.py`) — 정답을 아는 킥 영상 모으기
+
+목적: **우리 측정이 진짜 속도와 얼마나 다른지** 확인할 정답 데이터를 모은다. 정답은 두 가지다.
+- **레이더 숫자**: 영상 속 레이더 건·레이더 부스 숫자. 킥 하나당 ±6% 흔들리지만 평균 치우침은 작아서, 여럿의 평균으로 우리 치우침을 잰다
+  (Loughborough 대학 비교 연구: 레이더 0.4 m/s 치우침 · ±1.5 m/s, 스마트볼 4.8 m/s · ±6 m/s)
+- **페널티킥**: 페널티 지점~골라인 11 m 가 규격이라, 우리가 계산한 킥 거리가 11 m 와 얼마나 다른지가 곧 거리 축척(→ 속도) 오차
+- 스마트볼·앱 숫자는 정답으로 쓰지 않는다(20% 넘게 틀릴 수 있음) → 받지 않는다 (페널티킥이면 예외)
+
+```
+python3 scripts/refauto/refauto.py /Volumes/64B/freekick --collect             # 한 번 돌기
+python3 scripts/refauto/refauto.py /Volumes/64B/freekick --collect --dry-run   # 받지 않고 판단만
+```
+- 자동 실행: `install_launchd.sh` 가 6시간마다 실행 (`com.shootinglike.refcollect`, 기록 `~/Library/Logs/refcollect.log`). 수집만 빼려면 `REFCOLLECT=0 bash …`
+- 한 번에: 검색어 4개(관련도순·최신순 번갈아) × 30개 → 이미 본 영상 제외 → 제목·설명을 Jev 로 판단
+  (`content` 영상 종류 · `real_footage` · `device` 레이더/스마트볼·앱/추적 장비 · `penalty` · `full_goal`) → 통과한 것을 우선순위대로 하루 12개까지 받기
+  → `~/.refauto/collect/inbox/yt_<id>.mp4` → USB 영상 폴더가 있으면 맨 위로 옮김 → refauto 가 분석·정리
+- 판단 기준(`POLICY`, 실데이터로 아직 미조정): 실제 촬영 ≥ 0.5 · 킥 장면 영상 ≥ 0.5 · (레이더 ≥ 0.4 또는 페널티킥 ≥ 0.6) → 받기.
+  확률은 `state.json` 에 그대로 남기므로 기준을 바꿔도 다시 물어볼 필요가 없다
+- 상태 `~/.refauto/collect/`: `state.json`(본 영상·판단·받은 수), `sources.json`(받은 영상 → 출처·Jev 판단, 관리자 화면에 함께 올라감)
+- 필요: `.env.local` 의 `TYPESAFE_API_KEY`, 가상환경의 `yt-dlp[default]`(install_launchd.sh 가 실행할 때마다 최신으로), 유튜브용 JS 실행기(deno 또는 node — node 를 자동으로 찾음)
+- USB 를 빼는 중이면 옮기기를 미루고, 옮기는 도중이면 `usb_eject.sh` 가 끝날 때까지 기다린다
+- 유튜브가 '로봇 확인'으로 막으면 그 영상은 3번까지 다시 시도하고 넘어간다 (로그·대시보드에 오류 표시)
+
+### 정답 입력 → 오차 통계
+- `/admin/refauto` 의 '유튜브 수집' 탭 → 킥마다 **정답 입력**: 영상 속 숫자(km/h·mph), 측정 장비, 페널티킥 여부.
+  유튜브 링크가 카드에 있어 숫자를 보며 넣는다. 입력은 바로 DB 에 들어가고(다시 계산 없음), Mac 은 `_refauto/truth.json` 에 백업한다
+  (다시 계산해 킥 번호가 바뀌어도 킥 순간 0.4초 안이면 같은 킥으로 이어 붙음)
+- `/admin` 의 '측정 정확도': 레이더 정답 대비 평균 치우침·오차 중앙값(전체 / 확정만), 페널티킥 거리 오차. 구도별 20개가 목표
+
 ## DB 업로드
 `/api/admin/references` 에 `isActive=false` 로 올린다 — 앱 측정값이 아직 없어서 보정 계수 계산에는 섞이지 않고 목록에만 보인다.
 토큰은 `ADMIN_REFERENCE_TOKEN` 환경변수 또는 저장소 `.env.local` 에서 읽는다. 같은 킥은 한 번만 올라간다(원장에 id 기록).
@@ -109,7 +138,7 @@ bash scripts/refauto/install_launchd.sh --uninstall                   # 끄기
 ## 구성
 `refauto.py`(명령·원장) · `pipeline.py`(영상 1개 처리·판정) · `scan.py`(킥 찾기) · `detect.py`(멈춘 공·골대·더미·흰 선) ·
 `calib.py`(카메라 보정) · `track.py`(원본 해상도 공 추적·흔들림 보정) · `physics.py`(중력+항력+회전 궤적 맞춤) ·
-`review.py`(확인 페이지) · `upload.py`(DB 업로드) · `library.py`(폴더 정리·USB 안전 분리·백업) · `usb_eject.sh` · `manual_refs.json`(수동 분석 레퍼런스)
+`review.py`(확인 페이지) · `upload.py`(DB 업로드) · `collect.py`(유튜브 수집) · `library.py`(폴더 정리·USB 안전 분리·백업) · `usb_eject.sh` · `manual_refs.json`(수동 분석 레퍼런스)
 
 ## 검증 (2026-09-27, 11개 영상)
 | 영상 | 자동 | 수동 분석 | 차이 |

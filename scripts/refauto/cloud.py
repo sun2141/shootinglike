@@ -28,6 +28,7 @@ from review import sidecar_update
 from upload import token
 
 IMG_W = 1280            # 올리는 이미지 가로 (DB 용량을 아끼려고 줄인다)
+PAYLOAD = "p2"          # 올리는 모양이 바뀌면 올리기를 한 번 다시 한다 (p2: 출처·정답·킥 지점 좌표)
 BATCH_BYTES = 3_000_000  # Vercel 요청 한도 4.5MB 안쪽
 
 
@@ -104,7 +105,37 @@ def default_coord_w(info):
     return int(round(w * min(1.0, 1920 / w)))
 
 
-def kick_payload(out, stem, k, imgs, coord_w=None):
+# ------------------------------------------------------------ 정답 (관리자 화면에서 입력한 레이더 속도·페널티킥 여부)
+# 화면에서 입력하면 DB 에 바로 들어가고, 여기(_refauto/truth.json)에도 남겨 DB 를 지워도·다시 계산해도 유지된다.
+def load_truth(out):
+    try:
+        return json.loads((out / "truth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_truth(out, t):
+    tmp = out / "truth.json.tmp"
+    tmp.write_text(json.dumps(t, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(out / "truth.json")
+
+
+def truth_for(recs, k):
+    """다시 계산해 킥 번호가 바뀌어도 킥 순간(t_kick)이 0.4초 안이면 같은 킥으로 본다."""
+    if not recs:
+        return None
+    t = (k.get("fit") or {}).get("t_kick")
+    same = recs.get(str(k.get("kick")))
+    if same and (t is None or same.get("t_kick") is None or abs(same["t_kick"] - t) < 0.4):
+        return same
+    if t is not None:
+        for r in recs.values():
+            if r.get("t_kick") is not None and abs(r["t_kick"] - t) < 0.4:
+                return r
+    return None
+
+
+def kick_payload(out, stem, k, imgs, coord_w=None, truth=None):
     f = k.get("fit") or {}
     ov = out / "overlays" / f"{stem}_k{k.get('kick')}.jpg"
     fr = out / "frames" / f"{stem}_k{k.get('kick')}.jpg"
@@ -133,6 +164,9 @@ def kick_payload(out, stem, k, imgs, coord_w=None):
             "t_kick": f.get("t_kick"), "t_end": t_end, "ball_px": k.get("ball_px"),
             "goal_cross": f.get("goal_cross"), "goal": k.get("goal"),
             "calib": {x: calib.get(x) for x in ("f", "heights", "line_far_inliers", "line_rms_m", "ball_ratio", "reused_scene")},
+            # 킥 지점(골대 좌표, m): x 가로(골대 가운데 0) · y 골라인까지(음수) · z 높이 — 페널티 지점(0, -11) 확인에 쓴다
+            "p0": [round(float(x), 3) for x in f["P0"]] if f.get("P0") else None,
+            **({"truth": truth.get("truth"), "penalty": truth.get("penalty")} if truth else {}),
         },
         "overlayImageId": ov_i["id"] if ov_i else None,
         "frameImageId": fr_i["id"] if fr_i else None,
@@ -140,18 +174,36 @@ def kick_payload(out, stem, k, imgs, coord_w=None):
     }
 
 
-def video_payload(out, fp, v, imgs):
+def source_of(v):
+    """유튜브 수집으로 들어온 영상이면 출처(주소·제목·Jev 판단)."""
+    try:
+        import collect
+        return collect.source_for(v["file"])
+    except Exception:
+        return None
+
+
+def video_payload(out, fp, v, imgs, truth=None):
     stem = Path(v["file"]).stem
+    info = dict(v.get("info") or {})
+    src = source_of(v)
+    if src:
+        info["source"] = src
+    recs = (truth or {}).get(fp)
     return {
         "id": fp, "file": v["file"], "status": v.get("status", "unknown"), "reason": v.get("reason"),
-        "meta": v.get("meta"), "info": v.get("info"), "processedAt": v.get("processed_at"),
-        "kicks": [kick_payload(out, stem, k, imgs, default_coord_w(v.get("info"))) for k in v.get("kicks", []) if k.get("kick")],
+        "meta": v.get("meta"), "info": info, "processedAt": v.get("processed_at"),
+        "kicks": [kick_payload(out, stem, k, imgs, default_coord_w(v.get("info")), truth_for(recs, k))
+                  for k in v.get("kicks", []) if k.get("kick")],
     }
 
 
-def digest(v):
+def digest(v, truth=None):
     keep = {k: v.get(k) for k in ("file", "status", "reason", "meta", "processed_at")}
     keep["kicks"] = [{x: k.get(x) for x in ("kick", "status", "reasons", "fit", "notes")} for k in v.get("kicks", [])]
+    keep["payload"] = PAYLOAD
+    keep["truth"] = truth
+    keep["source"] = bool(source_of(v))
     return hashlib.sha1(json.dumps(keep, sort_keys=True, default=float).encode()).hexdigest()
 
 
@@ -187,6 +239,18 @@ def cycle(folder, base):
                 failed.append(e["id"])
                 continue
             name = video.name
+            if e["action"] == "truth":
+                # 정답은 다시 계산할 필요가 없다 — 결과 폴더의 truth.json 에만 적는다 (DB 에는 화면에서 이미 들어감)
+                t = load_truth(out)
+                m = e.get("meta") or {}
+                recs = t.setdefault(e["videoId"], {})
+                if m.get("truth") is None and m.get("penalty") is None:
+                    recs.pop(str(e["kick"]), None)
+                else:
+                    recs[str(e["kick"])] = {"truth": m.get("truth"), "penalty": m.get("penalty"), "t_kick": m.get("t_kick")}
+                save_truth(out, t)
+                handled.append(e["id"])
+                continue
             if e["action"] == "recompute":
                 sidecar_update(video, e["kick"], e.get("meta") or {}, e.get("clicks"))
                 redo.add(name)
@@ -220,13 +284,14 @@ def cycle(folder, base):
             return
         # 3) 바뀐 것만 올리기
         led = load_ledger(out)
+        truth = load_truth(out)
         n = 0
         for fp, v in led["videos"].items():
-            d = digest(v)
+            d = digest(v, truth.get(fp))
             if v.get("synced") == d:
                 continue
             imgs = []
-            payload = video_payload(out, fp, v, imgs)
+            payload = video_payload(out, fp, v, imgs, truth)
             try:
                 push_images(api, imgs)
                 api.call("POST", "/api/admin/refauto/sync", {"videos": [payload]}, timeout=120)

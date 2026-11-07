@@ -206,7 +206,7 @@ def backup(folder, led_path):
     try:
         dst.mkdir(parents=True, exist_ok=True)
         out = folder / RESULT_DIR
-        for name in ("ledger.json", "scenes.json"):
+        for name in ("ledger.json", "scenes.json", "truth.json"):
             if (out / name).exists():
                 shutil.copy2(out / name, dst / name)
         side = dst / "sidecars"
